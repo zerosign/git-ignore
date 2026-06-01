@@ -1,0 +1,27 @@
+#compdef git-ignore
+
+_git_ignore() {
+    local context state state_descr line
+    typeset -A opt_args
+
+    _arguments -s \
+        '(-u --update)'{-u,--update}'[Update the local templates repository]' \
+        '(-p --patch)'{-p,--patch}'[Patch the current .gitignore file instead of overwriting]' \
+        '(-l --list)'{-l,--list}'[List all available templates]' \
+        '(-i --info)'{-i,--info}'[Show information about current setup and integrity]' \
+        '(-v --version)'{-v,--version}'[Show version information]' \
+        '--compact[Compact the local database to save space]' \
+        '*:template:->templates'
+
+    case $state in
+        templates)
+            local -a templates
+            # Fetch templates and split by newline into an array
+            templates=("${(@f)$(git-ignore --list 2>/dev/null)}")
+            # Use _values with -s , to handle comma-separated list completion natively
+            _values -s , 'template' $templates
+            ;;
+    esac
+}
+
+_git_ignore "$@"
