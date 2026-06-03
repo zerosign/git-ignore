@@ -6,7 +6,7 @@ use mimalloc::MiMalloc;
 static GLOBAL: MiMalloc = MiMalloc;
 
 /// Entry point for the git-ignore CLI.
-/// 
+///
 /// **Logic:**
 /// 1. Initializes the `gix` interrupt handler to handle CTRL+C safely during long network operations (cloning/fetching).
 /// 2. Checks if any arguments were provided; if not, triggers the auto-generated help message.
@@ -31,12 +31,12 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     unsafe {
         let _ = gix::interrupt::init_handler(2, || {});
     }
-    
+
     let args: GitIgnoreArgs = argh::from_env();
     let config = Config::from_env()?;
-    
+
     // Core orchestration logic is separated into lib.rs for testability and reuse.
     run_cli(args, &config, std::io::stdout())?;
-    
+
     Ok(())
 }

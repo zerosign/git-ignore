@@ -11,9 +11,9 @@
 //!
 //! By wrapping managed templates in explicit markers:
 //! ```gitignore
-//! # --- BEGIN Rust ---
+//! # git-ignore-start: Rust
 //! target/
-//! # --- END Rust ---
+//! # git-ignore-end: Rust
 //! ```
 //! The tool achieves:
 //! - **Ownership**: It knows exactly which lines it is responsible for.
@@ -22,15 +22,38 @@
 //! - **Deduplication**: It prevents the same template from being added multiple times.
 
 use std::collections::HashMap;
+use crate::defs::{START_MARKER_PREFIX, END_MARKER_PREFIX};
 
 /// Represents a discrete section of a `.gitignore` file.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Block {
     /// Unmanaged content (e.g., user-defined rules or comments).
     Custom(String),
-    /// A template section managed by the tool, delimited by BEGIN/END markers.
+    /// A template section managed by the tool, delimited by start/end markers.
     Managed { name: String, content: String },
 }
+
+impl Block {
+    fn render(&self) -> Option<String> {
+        match self {
+            Block::Custom(c) => {
+                let trimmed = c.trim_end();
+                (!trimmed.is_empty()).then(|| format!("{}\n", trimmed))
+            }
+            Block::Managed { name, content } => {
+                let mut s = format!("{}{}\n", START_MARKER_PREFIX, name);
+                let trimmed = content.trim();
+                if !trimmed.is_empty() {
+                    s.push_str(trimmed);
+                    s.push('\n');
+                }
+                s.push_str(&format!("{}{}\n", END_MARKER_PREFIX, name));
+                Some(s)
+            }
+        }
+    }
+}
+
 
 /// A parser and serializer for block-based `.gitignore` management.
 pub struct Patcher {
@@ -40,81 +63,46 @@ pub struct Patcher {
 impl Patcher {
     /// Parses an existing `.gitignore` string into a sequence of [Block]s.
     ///
-    /// It recognizes both the current BEGIN/END marker format and legacy single-line
-    /// headers (`# === Name ===`), allowing for automatic migration to the new format.
+    /// It recognizes the start and end markers defined in [crate::defs].
+    /// Legacy markers are intentionally ignored and treated as custom content.
     pub fn parse(content: &str) -> Self {
         let mut blocks = Vec::new();
-        let mut current_custom = String::new();
-        
-        let lines: Vec<&str> = content.lines().collect();
-        let mut i = 0;
-        
-        while i < lines.len() {
-            let line = lines[i];
-            
-            // Check for new style BEGIN marker: # --- BEGIN Name ---
-            if line.starts_with("# --- BEGIN ") && line.ends_with(" ---") {
-                if !current_custom.is_empty() {
-                    blocks.push(Block::Custom(current_custom.clone()));
-                    current_custom.clear();
+        let mut unmanaged_buffer = String::new();
+        let mut lines = content.lines();
+
+        while let Some(line) = lines.next() {
+            // Check for the new, cleaner marker
+            if let Some(name) = line.strip_prefix(START_MARKER_PREFIX) {
+                if !unmanaged_buffer.is_empty() {
+                    blocks.push(Block::Custom(unmanaged_buffer.clone()));
+                    unmanaged_buffer.clear();
                 }
-                
-                let name = line[12..line.len()-4].to_string();
-                let mut managed_content = String::new();
-                i += 1;
-                
-                let mut found_end = false;
-                while i < lines.len() {
-                    let m_line = lines[i];
-                    if m_line == format!("# --- END {} ---", name) {
-                        found_end = true;
-                        break;
-                    }
-                    managed_content.push_str(m_line);
-                    managed_content.push('\n');
-                    i += 1;
-                }
-                
+
+                let name = name.to_string();
+                let end_marker = format!("{}{}", END_MARKER_PREFIX, name);
+
+                // Functionally consume all lines until the end marker (which is also consumed and discarded)
+                let managed_content = lines
+                    .by_ref()
+                    .take_while(|&m_line| m_line != end_marker.as_str())
+                    .fold(String::new(), |mut acc, l| {
+                        acc.push_str(l);
+                        acc.push('\n');
+                        acc
+                    });
+
                 blocks.push(Block::Managed { name, content: managed_content });
-                if found_end { i += 1; }
-                continue;
+            } else {
+                // Accumulate unmanaged content
+                unmanaged_buffer.push_str(line);
+                unmanaged_buffer.push('\n');
             }
-            
-            // Check for legacy style marker: # === Name ===
-            if line.starts_with("# === ") && line.ends_with(" ===") {
-                 if !current_custom.is_empty() {
-                    blocks.push(Block::Custom(current_custom.clone()));
-                    current_custom.clear();
-                }
-                
-                let name = line[6..line.len()-4].to_string();
-                let mut managed_content = String::new();
-                i += 1;
-                
-                // Legacy blocks end at the next marker or EOF
-                while i < lines.len() {
-                    let m_line = lines[i];
-                    if m_line.starts_with("# --- BEGIN ") || (m_line.starts_with("# === ") && m_line.ends_with(" ===")) {
-                        break;
-                    }
-                    managed_content.push_str(m_line);
-                    managed_content.push('\n');
-                    i += 1;
-                }
-                
-                blocks.push(Block::Managed { name, content: managed_content });
-                continue;
-            }
-            
-            current_custom.push_str(line);
-            current_custom.push('\n');
-            i += 1;
         }
-        
-        if !current_custom.is_empty() {
-            blocks.push(Block::Custom(current_custom));
+
+        if !unmanaged_buffer.is_empty() {
+            blocks.push(Block::Custom(unmanaged_buffer));
         }
-        
+
         Self { blocks }
     }
 
@@ -123,23 +111,29 @@ impl Patcher {
     /// If a [Block::Managed] section with a matching name (case-insensitive) exists, 
     /// its content is updated. Otherwise, a new managed block is appended to the end.
     pub fn patch(&mut self, new_templates: HashMap<String, String>) {
-        let mut template_map = new_templates;
-        
+        // Pre-normalize templates for O(1) lookup while preserving original casing
+        let mut templates: HashMap<String, (String, String)> = new_templates
+            .into_iter()
+            .map(|(k, v)| (k.to_lowercase(), (k, v)))
+            .collect();
+
         // 1. Update existing managed blocks
         for block in &mut self.blocks {
-            if let Block::Managed { name, content } = block {
-                let key = template_map.keys().find(|k| k.to_lowercase() == name.to_lowercase()).cloned();
-                if let Some(k) = key
-                    && let Some(new_content) = template_map.remove(&k) {
-                        *content = new_content.trim().to_string();
-                    }
+            if let Block::Managed { name, content } = block
+                && let Some((original_name, new_content)) = templates.remove(&name.to_lowercase())
+            {
+                *name = original_name; // Sync casing to the latest requested format
+                *content = new_content.trim().to_string();
             }
         }
-        
+
         // 2. Append new blocks for remaining templates
-        for (name, content) in template_map {
-            self.blocks.push(Block::Managed { name, content: content.trim().to_string() });
-        }
+        self.blocks.extend(templates.into_values().map(|(name, content)| {
+            Block::Managed {
+                name,
+                content: content.trim().to_string(),
+            }
+        }));
     }
 
     /// Serializes the blocks back into a single string.
@@ -147,43 +141,11 @@ impl Patcher {
     /// This method ensures a consistent format with exactly one blank line between
     /// blocks and clean trimming of managed content.
     pub fn serialize(&self) -> String {
-        // Pre-allocate capacity to reduce reallocations
-        let total_len: usize = self.blocks.iter().map(|b| match b {
-            Block::Custom(c) => c.len(),
-            Block::Managed { name, content } => name.len() * 2 + content.len() + 30, // Estimate for markers and extra spacing
-        }).sum();
-        
-        let mut out = String::with_capacity(total_len);
-        for (i, block) in self.blocks.iter().enumerate() {
-            match block {
-                Block::Custom(c) => {
-                    let trimmed = c.trim_end();
-                    if !trimmed.is_empty() {
-                        out.push_str(trimmed);
-                        out.push('\n');
-                    }
-                },
-                Block::Managed { name, content } => {
-                    out.push_str("# --- BEGIN ");
-                    out.push_str(name);
-                    out.push_str(" ---\n");
-                    let trimmed = content.trim();
-                    if !trimmed.is_empty() {
-                        out.push_str(trimmed);
-                        out.push('\n');
-                    }
-                    out.push_str("# --- END ");
-                    out.push_str(name);
-                    out.push_str(" ---\n");
-                }
-            }
-            
-            // Add exactly one blank line between blocks
-            if i < self.blocks.len() - 1 {
-                out.push('\n');
-            }
-        }
-        out
+        self.blocks
+            .iter()
+            .filter_map(|b| b.render())
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }
 
@@ -210,15 +172,16 @@ mod tests {
         let result = patcher.serialize();
         
         assert!(result.contains("custom_entry"));
-        assert!(result.contains("# --- BEGIN Rust ---"));
+        assert!(result.contains(START_MARKER_PREFIX));
+        assert!(result.contains("Rust"));
         assert!(result.contains("target/"));
-        assert!(result.contains("# --- END Rust ---"));
+        assert!(result.contains(END_MARKER_PREFIX));
     }
 
     #[test]
     fn test_patch_existing_template() {
-        let content = "# --- BEGIN Rust ---\nold_content\n# --- END Rust ---\n";
-        let mut patcher = Patcher::parse(content);
+        let content = format!("{}Rust\nold_content\n{}Rust\n", START_MARKER_PREFIX, END_MARKER_PREFIX);
+        let mut patcher = Patcher::parse(&content);
         
         let mut templates = HashMap::new();
         templates.insert("Rust".to_string(), "new_content\n".to_string());
@@ -227,22 +190,6 @@ mod tests {
         let result = patcher.serialize();
         
         assert!(!result.contains("old_content"));
-        assert!(result.contains("new_content"));
-    }
-
-    #[test]
-    fn test_legacy_migration() {
-        let content = "# === Rust ===\nlegacy_content\n";
-        let mut patcher = Patcher::parse(content);
-        
-        let mut templates = HashMap::new();
-        templates.insert("Rust".to_string(), "new_content\n".to_string());
-        
-        patcher.patch(templates);
-        let result = patcher.serialize();
-        
-        assert!(!result.contains("# === Rust ==="));
-        assert!(result.contains("# --- BEGIN Rust ---"));
         assert!(result.contains("new_content"));
     }
 }

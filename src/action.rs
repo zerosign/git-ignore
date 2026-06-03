@@ -26,51 +26,46 @@ pub enum CliAction {
     UpdateOnly,
     Compact,
     Generate {
-        templates_to_fetch: HashSet<String>,
+        templates: HashSet<String>,
         patch: bool,
     },
 }
 
 impl CliAction {
     pub fn from_args(args: &GitIgnoreArgs, _config: &Config) -> Result<Self> {
-        if args.version {
-            return Ok(Self::ShowVersion);
-        }
+        // I found this is better than if and else (personal opinion)
+        match (
+            args.version,
+            args.info,
+            args.list,
+            args.compact,
+            args.update,
+        ) {
+            (true, _, _, _, _) => Ok(Self::ShowVersion),
+            (_, true, _, _, _) => Ok(Self::ShowInfo),
+            (_, _, true, _, _) => Ok(Self::ListTemplates),
+            (_, _, _, true, _) => Ok(Self::Compact),
+            _ => {
+                let templates: HashSet<String> = args
+                    .templates
+                    .iter()
+                    .flat_map(|t_arg| t_arg.split(','))
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                    .map(String::from)
+                    .collect();
 
-        if args.info {
-            return Ok(Self::ShowInfo);
-        }
-
-        if args.list {
-            return Ok(Self::ListTemplates);
-        }
-
-        if args.compact {
-            return Ok(Self::Compact);
-        }
-
-        if args.update {
-            return Ok(Self::UpdateOnly);
-        }
-
-        let mut templates_to_fetch = HashSet::new();
-
-        for t_arg in &args.templates {
-            for t in t_arg.split(',') {
-                let trimmed = t.trim();
-                if !trimmed.is_empty() {
-                    templates_to_fetch.insert(trimmed.to_string());
+                match (templates.is_empty(), args.update) {
+                    (true, true) => Ok(Self::UpdateOnly),
+                    (true, false) => {
+                        Err(CliError::Discovery("No templates specified.".to_string()))
+                    }
+                    _ => Ok(Self::Generate {
+                        templates,
+                        patch: args.patch,
+                    }),
                 }
             }
-        }
-
-        if templates_to_fetch.is_empty() {
-            Err(CliError::Discovery("No templates specified.".to_string()))
-        } else {
-            Ok(Self::Generate {
-                templates_to_fetch,
-                patch: args.patch,
-            })
         }
     }
 }
@@ -96,35 +91,26 @@ pub fn populate_templates<D: redb::ReadableDatabase>(
         })
         .collect();
 
-
-    // TODO(@zerosign): refactor this by spliting the codes later on
     for template in templates_to_fetch {
-        let mut content = String::new();
-        let mut found = false;
+        // 1. Map the template to the potential database keys we need to check
+        let keys = match template.split_once('/') {
+            Some((source, name)) => vec![format!("{}/{}", source, name.to_lowercase())],
+            None => active_sources
+                .iter()
+                .map(|s| format!("{}/{}", s.name, template.to_lowercase()))
+                .collect(),
+        };
 
-        if let Some((source_name, template_name)) = template.split_once('/') {
-            let key = format!("{}/{}", source_name, template_name.to_lowercase());
+        // 2. Fetch and aggregate all matching template contents
+        let content: String = keys
+            .into_iter()
+            .filter_map(|key| table.get(key.as_str()).ok().flatten())
+            .map(|guard| guard.value().trim().to_string()) // Trim individual parts
+            .collect::<Vec<_>>()
+            .join("\n\n"); // Use double newline for clean separation between sources
 
-            if let Ok(Some(value)) = table.get(key.as_str()) {
-                content.push_str(value.value());
-                found = true;
-            }
-        } else {
-            let template_lower = template.to_lowercase();
-
-            for source in active_sources.iter() {
-                let key = format!("{}/{}", source.name, template_lower);
-                if let Ok(Some(value)) = table.get(key.as_str()) {
-                    if !content.is_empty() && !content.ends_with('\n') {
-                        content.push('\n');
-                    }
-                    content.push_str(value.value());
-                    found = true;
-                }
-            }
-        }
-
-        if found {
+        // 3. Insert if found, otherwise warn
+        if !content.is_empty() {
             contents.insert(template.clone(), content);
         } else {
             eprintln!(
@@ -146,6 +132,7 @@ pub fn list_templates<W: Write>(fst_path: &Path, writer: W) -> Result<(), ListEr
 
     let fst_bytes = fs::read(fst_path)?;
     let set = Set::new(fst_bytes).map_err(|e| ListError::Fst(e.to_string()))?;
+
     let mut stream = set.into_stream();
 
     let mut unique_names = BTreeSet::new();
@@ -167,6 +154,7 @@ pub fn list_templates<W: Write>(fst_path: &Path, writer: W) -> Result<(), ListEr
     }
 
     buffered.flush()?;
+
     Ok(())
 }
 
@@ -188,30 +176,28 @@ pub fn generate_template<D: redb::ReadableDatabase, W: io::Write, P: AsRef<Path>
 
     let gitignore_fpath = project_path.as_ref().join(".gitignore");
 
-    if patch {
-        let content = if gitignore_fpath.exists() {
-            fs::read_to_string(&gitignore_fpath)?
-        } else {
-            String::new()
-        };
+    let content = gitignore_fpath
+        .exists()
+        .then(|| fs::read_to_string(&gitignore_fpath).ok())
+        .flatten()
+        .unwrap_or_default();
 
-        let mut patcher = Patcher::parse(&content);
-        patcher.patch(templates_map);
-        let new_content = patcher.serialize();
+    let mut patcher = Patcher::parse(&content);
+    patcher.patch(templates_map);
+    let new_content = patcher.serialize();
 
-        if new_content != content {
+    match patch {
+        true if new_content != content => {
             fs::write(&gitignore_fpath, new_content)?;
             writeln!(writer, "Updated .gitignore")?;
-        } else {
+        }
+        true => {
             writeln!(writer, ".gitignore is already up to date")?;
         }
-    } else {
-        let mut patcher = Patcher::parse("");
-        patcher.patch(templates_map);
-        let content = patcher.serialize();
-
-        write!(writer, "{}", content.trim())?;
-        writeln!(writer)?;
+        _ => {
+            write!(writer, "{}", new_content.trim())?;
+            writeln!(writer)?;
+        }
     }
 
     Ok(())
@@ -259,6 +245,7 @@ pub fn show_info<D: redb::ReadableDatabase, W: Write>(
             "FST Index Hash:  {:x} (SHA256)",
             Sha256::digest(&fst_bytes)
         )?;
+
         writeln!(buffered, "FST Index Size:  {} bytes", fst_bytes.len())?;
     }
 

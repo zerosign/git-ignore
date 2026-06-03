@@ -44,8 +44,10 @@ impl gix::traverse::tree::Visit for TemplateVisitor {
 
     fn visit_nontree(&mut self, entry: &gix::objs::tree::EntryRef<'_>) -> VisitAction {
         let filename = entry.filename;
+
         if filename.ends_with(b".gitignore") {
-            let name_str = self.path_stack
+            let name_str = self
+                .path_stack
                 .iter()
                 .map(|p| {
                     let s = String::from_utf8_lossy(p);
@@ -53,9 +55,10 @@ impl gix::traverse::tree::Visit for TemplateVisitor {
                 })
                 .collect::<Vec<_>>()
                 .join("/");
-            
+
             self.templates.push((name_str, entry.oid.to_owned()));
         }
+
         VisitAction::Continue(false)
     }
 }

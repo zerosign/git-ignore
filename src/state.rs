@@ -18,16 +18,12 @@ pub enum RepoState {
 
 impl RepoState {
     pub fn determine(path: &Path, update: bool) -> Self {
-        if !path.exists() {
-            return RepoState::Missing;
+        match (path.exists(), update, gix::open(path).is_err()) {
+            (false, _, _) => RepoState::Missing,
+            (_, true, _) => RepoState::UpdateRequested,
+            (_, _, true) => RepoState::Corrupted,
+            _ => RepoState::Valid,
         }
-        if update {
-            return RepoState::UpdateRequested;
-        }
-        if gix::open(path).is_err() {
-            return RepoState::Corrupted;
-        }
-        RepoState::Valid
     }
 
     pub fn ensure(source: &TemplateSource, update: bool) -> Result<(), SyncError> {
@@ -99,32 +95,37 @@ impl SyncState {
         }
 
         let read_txn = db.begin_read()?;
+        let key = format!("last_commit_hash:{}", source_name);
 
-        if let Ok(meta_table) = read_txn.open_table(METADATA_TABLE) {
-            let key = format!("last_commit_hash:{}", source_name);
-            let last_oid_bytes = meta_table.get(key.as_str())?;
+        let last_hash = read_txn
+            .open_table(METADATA_TABLE)
+            .ok()
+            .and_then(|t| t.get(key.as_str()).ok().flatten())
+            .map(|b| String::from_utf8_lossy(b.value()).to_string());
 
-            if let Some(bytes) = last_oid_bytes {
-                let last_hash_str = String::from_utf8_lossy(bytes.value());
-                if last_hash_str == head_oid.to_string() {
-                    if let Ok(templates_table) = read_txn.open_table(TEMPLATES_TABLE) {
-                        let prefix = format!("{}/", source_name);
-                        let has_templates = templates_table
-                            .range(prefix.as_str()..)?
-                            .next()
-                            .and_then(|r| r.ok())
-                            .map(|(k, _)| k.value().starts_with(&prefix))
-                            .unwrap_or(false);
-
-                        if has_templates {
-                            return Ok(SyncState::UpToDate);
-                        }
-                    }
-                } else if let Ok(last_oid) = gix::ObjectId::from_hex(last_hash_str.as_bytes()) {
-                    return Ok(SyncState::Incremental(last_oid));
-                }
+        let state = match last_hash {
+            Some(hash)
+                if hash == head_oid.to_string() && is_source_populated(&read_txn, source_name) =>
+            {
+                SyncState::UpToDate
             }
-        }
-        Ok(SyncState::NeedsRebuild)
+            Some(hash) => gix::ObjectId::from_hex(hash.as_bytes())
+                .map(SyncState::Incremental)
+                .unwrap_or(SyncState::NeedsRebuild),
+            None => SyncState::NeedsRebuild,
+        };
+
+        Ok(state)
     }
+}
+
+fn is_source_populated(txn: &redb::ReadTransaction, source_name: &str) -> bool {
+    let prefix = format!("{}/", source_name);
+    txn.open_table(TEMPLATES_TABLE).is_ok_and(|t| {
+        t.range(prefix.as_str()..).is_ok_and(|mut r| {
+            r.next()
+                .and_then(|res| res.ok())
+                .is_some_and(|(k, _)| k.value().starts_with(&prefix))
+        })
+    })
 }

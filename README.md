@@ -3,7 +3,7 @@
 This is a personal technical study and a small utility I built to explore what's possible with high performance systems programming in Rust. It specifically looks at how to use [redb](https://github.com/cberner/redb) for storing data and [gix (gitoxide)](https://github.com/Byron/gitoxide) for handling Git repositories without the usual overhead.
 
 > [!WARNING]
-> This is a **pet project** of mine. I'm using it to learn and experiment with optimizations, so it's definitely **not** meant for production use or anything mission-critical. Use it at your own risk!
+> This is a **pet project** of mine. I'm using it to learn and experiment with optimizations, so it's definitely **not** meant for production use or anything mission critical. Use it at your own risk!
 
 ## Why build this?
 
@@ -40,8 +40,8 @@ These are the results I got using `strace -c` on my own Linux setup. Your result
 *Just for fun: A simple "Hello World" in some languages can take over 300 syscalls just to say hello!*
 
 ## Main Features
-- **Mix and Match**: You can pull templates from multiple places at once—like the standard GitHub ones plus your own personal repository.
-- **Smart Merging**: I built a "Patcher" that uses `BEGIN/END` markers in your `.gitignore`. It knows which parts it "owns" so it can update them without messing up your own custom rules.
+- **Mix and Match**: You can pull templates from multiple places at once like the standard GitHub ones plus your own personal repository.
+- **Smart Merging**: I built a "Patcher" that uses `git-ignore-start/end` markers in your `.gitignore`. It knows which parts it "owns" so it can update them without messing up your own custom rules.
 - **Fast Updates**: It only downloads what has actually changed since the last time you ran it.
 
 ## How to play with it

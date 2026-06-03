@@ -1,5 +1,8 @@
-use std::fs::{self, remove_file};
-use std::path::Path;
+use std::{
+    fs::{self, remove_file},
+    path::Path,
+};
+
 use fst::SetBuilder;
 use gix::{ObjectId, Repository};
 use redb::{Database, ReadableTable};
@@ -10,27 +13,26 @@ use crate::{
     defs::{METADATA_TABLE, TEMPLATES_OIDS_TABLE, TEMPLATES_TABLE},
     error::SyncError,
     result::Result,
-    state::{SyncState, RepoState},
+    state::{RepoState, SyncState},
 };
 
-/// Operations to be executed inside the database transaction.
-pub struct SyncDiff {
-    pub upserts: Vec<(String, ObjectId, String)>, // (namespaced_name, oid, source_name)
-    pub deletes: Vec<String>,                          // (namespaced_name)
+/// A pending template update.
+pub struct SyncUpsert {
+    pub namespace: String,
+    pub oid: String,
+    pub content: String,
 }
 
-impl Default for SyncDiff {
-    fn default() -> Self {
-        Self::new()
-    }
+/// Operations to be executed inside the database transaction.
+#[derive(Default)]
+pub struct SyncDiff {
+    pub upserts: Vec<SyncUpsert>,
+    pub deletes: Vec<String>,
 }
 
 impl SyncDiff {
     pub fn new() -> Self {
-        Self {
-            upserts: vec![],
-            deletes: vec![],
-        }
+        Self::default()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -52,7 +54,8 @@ impl<'a> SyncUpdater<'a> {
 
     /// Returns the HEAD OID for the repository.
     pub fn head_oid(&self) -> Result<ObjectId, SyncError> {
-        Ok(self.repo
+        Ok(self
+            .repo
             .head()?
             .id()
             .ok_or_else(|| {
@@ -81,38 +84,63 @@ impl<'a> SyncUpdater<'a> {
                 let old_tree = self.repo.find_object(last_oid)?.peel_to_tree()?;
                 let new_tree = self.repo.find_object(head_oid)?.peel_to_tree()?;
 
-                old_tree.changes()?.for_each_to_obtain_tree(&new_tree, |change| {
-                    use gix::object::tree::diff::Change;
-                    let (location, oid_opt) = match change {
-                        Change::Addition { location, id, .. } => (location, Some(id.detach())),
-                        Change::Modification { location, id, .. } => (location, Some(id.detach())),
-                        Change::Deletion { location, .. } => (location, None),
-                        Change::Rewrite { location, id, .. } => (location, Some(id.detach())),
-                    };
-                    if location.ends_with(b".gitignore") {
-                        let name = location
-                            .strip_suffix(b".gitignore")
-                            .ok_or_else(|| SyncError::GitOp("Invalid suffix".to_string()))?;
-                        let name_str = String::from_utf8_lossy(name).to_lowercase();
-                        let namespaced_name = format!("{}/{}", self.source.name, name_str);
-                        if let Some(oid) = oid_opt {
-                            global_diff.upserts.push((namespaced_name, oid, self.source.name.clone()));
-                        } else {
-                            global_diff.deletes.push(namespaced_name);
+                let mut to_upsert_oids = Vec::new();
+
+                old_tree
+                    .changes()?
+                    .for_each_to_obtain_tree(&new_tree, |change| {
+                        use gix::object::tree::diff::Change;
+
+                        let (location, oid_opt) = match change {
+                            Change::Addition { location, id, .. } => (location, Some(id.detach())),
+                            Change::Modification { location, id, .. } => {
+                                (location, Some(id.detach()))
+                            }
+                            Change::Deletion { location, .. } => (location, None),
+                            Change::Rewrite { location, id, .. } => (location, Some(id.detach())),
+                        };
+                        if location.ends_with(b".gitignore") {
+                            let name = location
+                                .strip_suffix(b".gitignore")
+                                .ok_or_else(|| SyncError::GitOp("Invalid suffix".to_string()))?;
+
+                            let name_str = String::from_utf8_lossy(name).to_lowercase();
+                            let namespaced_name = format!("{}/{}", self.source.name, name_str);
+
+                            if let Some(oid) = oid_opt {
+                                to_upsert_oids.push((namespaced_name, oid));
+                            } else {
+                                global_diff.deletes.push(namespaced_name);
+                            }
                         }
-                    }
-                    Ok::<gix::diff::tree::visit::Action, SyncError>(
-                        gix::diff::tree::visit::Action::Continue(()),
-                    )
-                })?;
+
+                        Ok::<gix::diff::tree::visit::Action, SyncError>(
+                            gix::diff::tree::visit::Action::Continue(()),
+                        )
+                    })?;
+
+                for (name, oid) in to_upsert_oids {
+                    global_diff.upserts.push(SyncUpsert {
+                        namespace: name,
+                        oid: oid.to_string(),
+                        content: self.fetch_blob(oid)?,
+                    });
+                }
+
                 Ok(Some(head_oid))
             }
             _ => {
                 let all = SyncState::fetch_all_templates(&self.repo, &head_oid)?;
+
                 for (name, oid) in all {
                     let namespaced_name = format!("{}/{}", self.source.name, name);
-                    global_diff.upserts.push((namespaced_name, oid, self.source.name.clone()));
+                    global_diff.upserts.push(SyncUpsert {
+                        namespace: namespaced_name,
+                        oid: oid.to_string(),
+                        content: self.fetch_blob(oid)?,
+                    });
                 }
+
                 Ok(Some(head_oid))
             }
         }
@@ -142,6 +170,7 @@ impl<'a> SyncManager<'a> {
                 RepoState::ensure(source, force_update)?;
             }
         }
+
         Ok(())
     }
 
@@ -158,15 +187,16 @@ impl<'a> SyncManager<'a> {
 
         // 2. Compute Diffs
         let mut global_diff = SyncDiff::new();
-        let mut updaters = Vec::new();
         let mut updated_sources = Vec::new();
 
         for source in &self.config.sources {
             let updater = SyncUpdater::new(source)?;
-            if let Some(head_oid) = updater.compute_diff(&db, &self.config.fst_path, &mut global_diff)? {
+
+            if let Some(head_oid) =
+                updater.compute_diff(&db, &self.config.fst_path, &mut global_diff)?
+            {
                 updated_sources.push((source.name.clone(), head_oid));
             }
-            updaters.push(updater);
         }
 
         if global_diff.is_empty() && updated_sources.is_empty() && self.config.fst_path.exists() {
@@ -174,7 +204,7 @@ impl<'a> SyncManager<'a> {
         }
 
         // 3. Apply Diff in a single transaction
-        self.apply_updates(&db, global_diff, &updaters, updated_sources)
+        self.apply_updates(&db, global_diff, updated_sources)
     }
 
     /// Internal helper to apply computed diffs and update metadata/index.
@@ -182,10 +212,10 @@ impl<'a> SyncManager<'a> {
         &self,
         db: &Database,
         global_diff: SyncDiff,
-        updaters: &[SyncUpdater],
         updated_sources: Vec<(String, ObjectId)>,
     ) -> Result<(), SyncError> {
         let write_txn = db.begin_write()?;
+
         {
             let mut table = write_txn.open_table(TEMPLATES_TABLE)?;
             let mut oids_table = write_txn.open_table(TEMPLATES_OIDS_TABLE)?;
@@ -195,28 +225,22 @@ impl<'a> SyncManager<'a> {
                 let _ = oids_table.remove(name.as_str());
             }
 
-            for (namespaced_name, oid, source_name) in global_diff.upserts {
-                let oid_str = oid.to_string();
-                if let Ok(Some(existing_oid)) = oids_table.get(namespaced_name.as_str())
-                    && existing_oid.value() == oid_str
-                {
+            for upsert in global_diff.upserts {
+                let already_up_to_date = oids_table
+                    .get(upsert.namespace.as_str())
+                    .is_ok_and(|opt| opt.is_some_and(|guard| guard.value() == upsert.oid));
+
+                if already_up_to_date {
                     continue;
                 }
 
-                let updater = updaters
-                    .iter()
-                    .find(|u| u.source.name == source_name)
-                    .ok_or_else(|| {
-                        SyncError::GitOp(format!("Updater not found for source: {}", source_name))
-                    })?;
-
-                let content = updater.fetch_blob(oid)?;
-                table.insert(namespaced_name.as_str(), content.as_str())?;
-                oids_table.insert(namespaced_name.as_str(), oid_str.as_str())?;
+                table.insert(upsert.namespace.as_str(), upsert.content.as_str())?;
+                oids_table.insert(upsert.namespace.as_str(), upsert.oid.as_str())?;
             }
 
             // Update Metadata
             let mut meta_table = write_txn.open_table(METADATA_TABLE)?;
+
             for (source_name, head_oid) in updated_sources {
                 let key = format!("last_commit_hash:{}", source_name);
                 meta_table.insert(key.as_str(), head_oid.to_string().as_bytes())?;
@@ -232,12 +256,15 @@ impl<'a> SyncManager<'a> {
                 .collect();
 
             names.sort();
+
             let mut builder = SetBuilder::memory();
+
             for name in names {
                 builder
                     .insert(&name)
                     .map_err(|e| SyncError::Fst(e.to_string()))?;
             }
+
             fs::write(
                 &self.config.fst_path,
                 builder
@@ -247,6 +274,7 @@ impl<'a> SyncManager<'a> {
         }
 
         write_txn.commit()?;
+
         Ok(())
     }
 }

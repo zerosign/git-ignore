@@ -59,10 +59,7 @@ pub fn run_cli<W: Write>(args: GitIgnoreArgs, config: &Config, writer: W) -> Res
             list_templates(&config.fst_path, writer)?;
             Ok(())
         }
-        CliAction::Generate {
-            templates_to_fetch,
-            patch,
-        } => {
+        CliAction::Generate { templates, patch } => {
             if !config.db_path.exists() {
                 return Err(CliError::Discovery(
                     "Database not found. Run with -u first.".to_string(),
@@ -75,7 +72,7 @@ pub fn run_cli<W: Write>(args: GitIgnoreArgs, config: &Config, writer: W) -> Res
 
             generate_template(
                 &db,
-                &templates_to_fetch,
+                &templates,
                 &config.sources,
                 &config.project_path,
                 patch,
@@ -178,7 +175,7 @@ mod tests {
             run_cli(args_default("Rust"), &config, Vec::new())?;
 
             let gitignore_content = fs::read_to_string(sandbox.path().join(".gitignore"))?;
-            assert!(gitignore_content.contains("# --- BEGIN Rust ---"));
+            assert!(gitignore_content.contains("# git-ignore-start: Rust"));
             assert!(gitignore_content.contains("target/"));
             Ok(())
         })
@@ -206,7 +203,7 @@ mod tests {
 
             let gitignore_content = fs::read_to_string(&gitignore_path)?;
             assert!(gitignore_content.starts_with("existing_entry\n"));
-            assert!(gitignore_content.contains("# --- BEGIN Rust ---"));
+            assert!(gitignore_content.contains("# git-ignore-start: Rust"));
             Ok(())
         })
     }
@@ -296,7 +293,7 @@ mod tests {
 
             let gitignore_path = sandbox.path().join(".gitignore");
             let content = fs::read_to_string(&gitignore_path)?;
-            assert!(content.contains("# --- BEGIN Rust ---"));
+            assert!(content.contains("# git-ignore-start: Rust"));
             assert!(!content.contains("# === NonExistent ==="));
             Ok(())
         })
@@ -433,11 +430,11 @@ mod tests {
             db_path: data_dir.path().join("templates.redb"),
             fst_path: data_dir.path().join("templates.fst"),
             project_path: sandbox.path().to_path_buf(),
-            };
+        };
 
-            SyncManager::new(&config).sync()?;
+        SyncManager::new(&config).sync()?;
 
-            let mut args = args_default("Common");
+        let mut args = args_default("Common");
         args.patch = false;
 
         let mut output = Vec::new();

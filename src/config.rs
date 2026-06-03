@@ -47,27 +47,25 @@ impl Config {
         );
 
         if !source_list_env.trim().is_empty() {
-            for part in source_list_env.split(',') {
-                let part = part.trim();
-                if part.is_empty() {
-                    continue;
-                }
-
-                if let Some((name, url)) = part.split_once('=') {
+            let new_sources = source_list_env
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .filter_map(|part| part.split_once('='))
+                .filter_map(|(name, url)| {
                     let name = name.trim().to_string();
                     let url = url.trim().to_string();
 
                     if !name.is_empty() && !url.is_empty() {
                         let path = base_path.join(format!("sources/{}", name));
-                        sources.insert(name.clone(), TemplateSource { name, url, path });
+                        Some((name.clone(), TemplateSource { name, url, path }))
+                    } else {
+                        eprintln!("Warning: invalid source format, expected name=url");
+                        None
                     }
-                } else {
-                    eprintln!(
-                        "Warning: invalid source format '{}', expected name=url",
-                        part
-                    );
-                }
-            }
+                });
+
+            sources.extend(new_sources);
         };
 
         let sources = sources.values().cloned().collect();
