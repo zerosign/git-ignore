@@ -32,6 +32,10 @@ pub enum CliAction {
 }
 
 impl CliAction {
+    /// Resolves the `CliAction` from `GitIgnoreArgs`.
+    ///
+    /// # Errors
+    /// Returns `CliError` if templates are not specified.
     pub fn from_args(args: &GitIgnoreArgs, _config: &Config) -> Result<Self> {
         // I found this is better than if and else (personal opinion)
         match (
@@ -39,7 +43,7 @@ impl CliAction {
             args.info,
             args.list,
             args.compact,
-            args.update,
+            args.update || args.force,
         ) {
             (true, _, _, _, _) => Ok(Self::ShowVersion),
             (_, true, _, _, _) => Ok(Self::ShowInfo),
@@ -55,7 +59,7 @@ impl CliAction {
                     .map(String::from)
                     .collect();
 
-                match (templates.is_empty(), args.update) {
+                match (templates.is_empty(), args.update || args.force) {
                     (true, true) => Ok(Self::UpdateOnly),
                     (true, false) => {
                         Err(CliError::Discovery("No templates specified.".to_string()))
@@ -70,8 +74,12 @@ impl CliAction {
     }
 }
 
-pub fn populate_templates<D: redb::ReadableDatabase>(
-    templates_to_fetch: &HashSet<String>,
+/// Populates and resolves the requested templates from active sources.
+///
+/// # Errors
+/// Returns an error if the database cannot be read or template retrieval fails.
+pub fn populate_templates<D: redb::ReadableDatabase, S: std::hash::BuildHasher>(
+    templates: &HashSet<String, S>,
     sources: &[TemplateSource],
     db: &D,
 ) -> Result<HashMap<String, String>, GenerateError> {
@@ -91,7 +99,7 @@ pub fn populate_templates<D: redb::ReadableDatabase>(
         })
         .collect();
 
-    for template in templates_to_fetch {
+    for template in templates {
         // 1. Map the template to the potential database keys we need to check
         let keys = match template.split_once('/') {
             Some((source, name)) => vec![format!("{}/{}", source, name.to_lowercase())],
@@ -110,19 +118,20 @@ pub fn populate_templates<D: redb::ReadableDatabase>(
             .join("\n\n"); // Use double newline for clean separation between sources
 
         // 3. Insert if found, otherwise warn
-        if !content.is_empty() {
-            contents.insert(template.clone(), content);
+        if content.is_empty() {
+            eprintln!("Warning: Template '{template}' not found in any active source");
         } else {
-            eprintln!(
-                "Warning: Template '{}' not found in any active source",
-                template
-            );
+            contents.insert(template.clone(), content);
         }
     }
 
     Ok(contents)
 }
 
+/// Lists all available templates in the FST index.
+///
+/// # Errors
+/// Returns `ListError` if the FST index is missing, corrupt, or writing to the writer fails.
 pub fn list_templates<W: Write>(fst_path: &Path, writer: W) -> Result<(), ListError> {
     if !fst_path.exists() {
         return Err(ListError::Discovery(
@@ -150,7 +159,7 @@ pub fn list_templates<W: Write>(fst_path: &Path, writer: W) -> Result<(), ListEr
     let mut buffered = std::io::BufWriter::new(writer);
 
     for name in unique_names {
-        writeln!(buffered, "{}", name)?;
+        writeln!(buffered, "{name}")?;
     }
 
     buffered.flush()?;
@@ -158,9 +167,18 @@ pub fn list_templates<W: Write>(fst_path: &Path, writer: W) -> Result<(), ListEr
     Ok(())
 }
 
-pub fn generate_template<D: redb::ReadableDatabase, W: io::Write, P: AsRef<Path>>(
+/// Generates the .gitignore output by assembling and optional patching of templates.
+///
+/// # Errors
+/// Returns `GenerateError` if template lookup, writing, or patch execution fails.
+pub fn generate_template<
+    D: redb::ReadableDatabase,
+    W: io::Write,
+    P: AsRef<Path>,
+    S: std::hash::BuildHasher,
+>(
     db: &D,
-    templates: &HashSet<String>,
+    templates: &HashSet<String, S>,
     sources: &[TemplateSource],
     project_path: P,
     patch: bool,
@@ -184,6 +202,7 @@ pub fn generate_template<D: redb::ReadableDatabase, W: io::Write, P: AsRef<Path>
 
     let mut patcher = Patcher::parse(&content);
     patcher.patch(templates_map);
+
     let new_content = patcher.serialize();
 
     match patch {
@@ -203,6 +222,23 @@ pub fn generate_template<D: redb::ReadableDatabase, W: io::Write, P: AsRef<Path>
     Ok(())
 }
 
+fn format_file_hash(path: &Path) -> Option<String> {
+    let bytes = fs::read(path).ok()?;
+    let hash = Sha256::digest(&bytes);
+    let mut hex = String::with_capacity(64);
+
+    for b in hash {
+        use std::fmt::Write as _;
+        let _ = write!(hex, "{b:02x}");
+    }
+
+    Some(hex)
+}
+
+/// Displays database and system integrity info to the writer.
+///
+/// # Errors
+/// Returns `InfoError` if database querying or writing to the output buffer fails.
 pub fn show_info<D: redb::ReadableDatabase, W: Write>(
     config: &Config,
     db: &D,
@@ -222,8 +258,7 @@ pub fn show_info<D: redb::ReadableDatabase, W: Write>(
                 buffered,
                 "  HEAD: {}",
                 head.id()
-                    .map(|id| id.to_string())
-                    .unwrap_or_else(|| "Unknown".to_string())
+                    .map_or_else(|| "Unknown".to_string(), |id| id.to_string())
             )?;
         }
     }
@@ -231,22 +266,12 @@ pub fn show_info<D: redb::ReadableDatabase, W: Write>(
     writeln!(buffered, "Database Path:   {}", config.db_path.display())?;
     writeln!(buffered, "FST Index Path:  {}", config.fst_path.display())?;
 
-    if let Ok(db_bytes) = fs::read(&config.db_path) {
-        writeln!(
-            buffered,
-            "Database Hash:   {:x} (SHA256)",
-            Sha256::digest(&db_bytes)
-        )?;
+    if let Some(hashed) = format_file_hash(&config.db_path) {
+        writeln!(buffered, "Database Hash:   {hashed} (SHA256)")?;
     }
 
-    if let Ok(fst_bytes) = fs::read(&config.fst_path) {
-        writeln!(
-            buffered,
-            "FST Index Hash:  {:x} (SHA256)",
-            Sha256::digest(&fst_bytes)
-        )?;
-
-        writeln!(buffered, "FST Index Size:  {} bytes", fst_bytes.len())?;
+    if let Some(hashed) = format_file_hash(&config.fst_path) {
+        writeln!(buffered, "FST Index Hash:  {hashed} (SHA256)")?;
     }
 
     let read_txn = db.begin_read()?;

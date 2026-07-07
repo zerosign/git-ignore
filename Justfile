@@ -25,6 +25,12 @@ release-static:
         --no-default-features --features performance
     @echo "Static binary generated at: target/x86_64-unknown-linux-musl/release/git-ignore"
 
+# Build and install the static binary to ~/.cargo/bin
+install-static: release-static
+    mkdir -p ~/.cargo/bin
+    cp target/x86_64-unknown-linux-musl/release/git-ignore ~/.cargo/bin/git-ignore
+    @echo "Static binary installed to: ~/.cargo/bin/git-ignore"
+
 # Build a standard optimized binary for a specific target (used by CI for macOS/Windows)
 release-dynamic target:
     cargo build --target {{target}} --release \

@@ -1,11 +1,16 @@
 use argh::FromArgs;
 
+#[allow(clippy::struct_excessive_bools)]
 #[derive(FromArgs, PartialEq, Debug, Clone)]
 /// Git-ignore CLI
 pub struct GitIgnoreArgs {
     #[argh(switch, short = 'u')]
     /// update the local templates repository
     pub update: bool,
+    #[argh(switch, short = 'f')]
+    /// force a clean update (delete local repo caches and re-index all templates from scratch)
+    /// TODO(@zerosign): we need to differentiate this to only just reindexing
+    pub force: bool,
     #[argh(switch, short = 'p')]
     /// patch the current .gitignore file instead of overwriting
     pub patch: bool,

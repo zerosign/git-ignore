@@ -20,7 +20,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             Ok(_) => unreachable!(),
             Err(exit) => {
                 println!("{}", exit.output);
-                std::process::exit(if exit.status.is_ok() { 0 } else { 1 });
+                std::process::exit(i32::from(exit.status.is_err()));
             }
         }
     }
@@ -36,7 +36,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let config = Config::from_env()?;
 
     // Core orchestration logic is separated into lib.rs for testability and reuse.
-    run_cli(args, &config, std::io::stdout())?;
+    run_cli(&args, &config, std::io::stdout())?;
 
     Ok(())
 }

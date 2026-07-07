@@ -24,8 +24,12 @@ use crate::action::{generate_template, list_templates, show_info};
 
 build_info::build_info!(fn show_version);
 
-pub fn run_cli<W: Write>(args: GitIgnoreArgs, config: &Config, writer: W) -> Result<()> {
-    let action = CliAction::from_args(&args, config)?;
+/// Orchestrates the CLI execution flow based on parsed arguments and configuration.
+///
+/// # Errors
+/// Returns any `CliError`, `CompactError`, `SyncError`, `InfoError`, `ListError`, or `GenerateError` that occurs during processing.
+pub fn run_cli<W: Write>(args: &GitIgnoreArgs, config: &Config, writer: W) -> Result<()> {
+    let action = CliAction::from_args(args, config)?;
     let sync_manager = SyncManager::new(config);
 
     match action {
@@ -42,8 +46,8 @@ pub fn run_cli<W: Write>(args: GitIgnoreArgs, config: &Config, writer: W) -> Res
             Ok(())
         }
         CliAction::UpdateOnly => {
-            sync_manager.ensure_repos(args.update)?;
-            sync_manager.sync()?;
+            let outcomes = sync_manager.ensure_repos(args.update, args.force)?;
+            sync_manager.sync(&outcomes)?;
             Ok(())
         }
         CliAction::ShowInfo => {
@@ -124,6 +128,7 @@ mod tests {
         let sandbox = tempdir()?;
         let data_dir = tempdir()?;
         let repo_path = data_dir.path().join("gitignore");
+
         fs::create_dir_all(&repo_path)?;
 
         run_git!(
@@ -134,6 +139,7 @@ mod tests {
         );
 
         fs::write(repo_path.join("Rust.gitignore"), "target/")?;
+
         run_git!(&repo_path, ["add", "."], ["commit", "-m", "init"]);
 
         func(sandbox, data_dir, &repo_path)
@@ -144,6 +150,7 @@ mod tests {
     fn args_default(template: &str) -> GitIgnoreArgs {
         GitIgnoreArgs {
             update: false,
+            force: false,
             patch: true,
             list: false,
             info: false,
@@ -171,12 +178,15 @@ mod tests {
                 project_path: sandbox.path().to_path_buf(),
             };
 
-            SyncManager::new(&config).sync()?;
-            run_cli(args_default("Rust"), &config, Vec::new())?;
+            SyncManager::new(&config).sync(&[])?;
+
+            run_cli(&args_default("Rust"), &config, Vec::new())?;
 
             let gitignore_content = fs::read_to_string(sandbox.path().join(".gitignore"))?;
+
             assert!(gitignore_content.contains("# git-ignore-start: Rust"));
             assert!(gitignore_content.contains("target/"));
+
             Ok(())
         })
     }
@@ -185,6 +195,7 @@ mod tests {
     fn test_patch_existing_file() -> Result<()> {
         run_in_repo(|sandbox, data_dir, repo_path| {
             let gitignore_path = sandbox.path().join(".gitignore");
+
             fs::write(&gitignore_path, "existing_entry")?;
 
             let config = Config {
@@ -198,12 +209,15 @@ mod tests {
                 project_path: sandbox.path().to_path_buf(),
             };
 
-            SyncManager::new(&config).sync()?;
-            run_cli(args_default("Rust"), &config, Vec::new())?;
+            SyncManager::new(&config).sync(&[])?;
+
+            run_cli(&args_default("Rust"), &config, Vec::new())?;
 
             let gitignore_content = fs::read_to_string(&gitignore_path)?;
+
             assert!(gitignore_content.starts_with("existing_entry\n"));
             assert!(gitignore_content.contains("# git-ignore-start: Rust"));
+
             Ok(())
         })
     }
@@ -222,8 +236,10 @@ mod tests {
                 project_path: data_dir.path().to_path_buf(),
             };
 
-            SyncManager::new(&config).sync()?;
+            SyncManager::new(&config).sync(&[])?;
+
             list_templates(&config.fst_path, Vec::new())?;
+
             Ok(())
         })
     }
@@ -232,6 +248,7 @@ mod tests {
     fn test_clone_if_not_exists() -> Result<()> {
         run_in_repo(|sandbox, data_dir, repo_path| {
             let _ = fs::remove_dir_all(repo_path);
+
             let config = Config {
                 sources: vec![TemplateSource {
                     name: "default".to_string(),
@@ -242,7 +259,9 @@ mod tests {
                 fst_path: data_dir.path().join("templates.fst"),
                 project_path: sandbox.path().to_path_buf(),
             };
-            assert!(run_cli(args_default("Rust"), &config, Vec::new()).is_err());
+
+            assert!(run_cli(&args_default("Rust"), &config, Vec::new()).is_err());
+
             Ok(())
         })
     }
@@ -266,7 +285,9 @@ mod tests {
 
             let mut args = args_default("Rust");
             args.update = true;
-            assert!(run_cli(args, &config, Vec::new()).is_err());
+
+            assert!(run_cli(&args, &config, Vec::new()).is_err());
+
             Ok(())
         })
     }
@@ -288,13 +309,17 @@ mod tests {
             let mut args = args_default("");
             args.patch = true;
             args.templates = vec!["Rust".to_string(), "NonExistent".to_string()];
-            SyncManager::new(&config).sync()?;
-            run_cli(args, &config, Vec::new())?;
+
+            SyncManager::new(&config).sync(&[])?;
+
+            run_cli(&args, &config, Vec::new())?;
 
             let gitignore_path = sandbox.path().join(".gitignore");
             let content = fs::read_to_string(&gitignore_path)?;
+
             assert!(content.contains("# git-ignore-start: Rust"));
             assert!(!content.contains("# === NonExistent ==="));
+
             Ok(())
         })
     }
@@ -313,9 +338,12 @@ mod tests {
                 project_path: data_dir.path().to_path_buf(),
             };
 
-            SyncManager::new(&config).sync()?;
+            SyncManager::new(&config).sync(&[])?;
+
             let db = redb::Builder::new().open_read_only(&config.db_path)?;
+
             show_info(&config, &db, Vec::new())?;
+
             Ok(())
         })
     }
@@ -329,15 +357,19 @@ mod tests {
                 .arg("rev-parse")
                 .arg("HEAD")
                 .output()?;
+
             let commit1_hash = String::from_utf8_lossy(&output_c1.stdout)
                 .trim()
                 .to_string();
 
             fs::write(repo_path.join("Node.gitignore"), "node_modules/")?;
             fs::write(repo_path.join("Rust.gitignore"), "target/\nCargo.lock")?;
+
             run_git!(repo_path, ["add", "."], ["commit", "-m", "second"]);
+
             fs::remove_file(repo_path.join("Rust.gitignore"))?;
             fs::write(repo_path.join("Python.gitignore"), "__pycache__/")?;
+
             run_git!(repo_path, ["add", "."], ["commit", "-m", "third"]);
 
             let config = Config {
@@ -351,32 +383,40 @@ mod tests {
                 project_path: sandbox.path().to_path_buf(),
             };
 
-            SyncManager::new(&config).sync()?;
+            SyncManager::new(&config).sync(&[])?;
 
             {
                 let db = Database::create(&config.db_path)?;
                 let write_txn = db.begin_write()?;
+
                 {
                     let mut meta_table = write_txn.open_table(METADATA_TABLE)?;
                     meta_table.insert("last_commit_hash:default", commit1_hash.as_bytes())?;
                 }
+
                 write_txn.commit()?;
             }
 
-            SyncManager::new(&config).sync()?;
+            SyncManager::new(&config).sync(&[])?;
+
             let db = Database::create(&config.db_path)?;
             let read_txn = db.begin_read()?;
             let table = read_txn.open_table(TEMPLATES_TABLE)?;
 
             assert!(table.get("default/rust")?.is_none());
+
             let node_val = table
                 .get("default/node")?
                 .ok_or_else(|| CliError::Git("Node exist".to_string()))?;
+
             assert_eq!(node_val.value(), "node_modules/");
+
             let py_val = table
                 .get("default/python")?
                 .ok_or_else(|| CliError::Git("Python exist".to_string()))?;
+
             assert_eq!(py_val.value(), "__pycache__/");
+
             Ok(())
         })
     }
@@ -432,13 +472,13 @@ mod tests {
             project_path: sandbox.path().to_path_buf(),
         };
 
-        SyncManager::new(&config).sync()?;
+        SyncManager::new(&config).sync(&[])?;
 
         let mut args = args_default("Common");
         args.patch = false;
 
         let mut output = Vec::new();
-        run_cli(args, &config, &mut output)?;
+        run_cli(&args, &config, &mut output)?;
 
         let content = String::from_utf8_lossy(&output);
 
@@ -450,20 +490,145 @@ mod tests {
 
         output.clear();
 
-        run_cli(args, &config, &mut output)?;
+        run_cli(&args, &config, &mut output)?;
 
         assert!(String::from_utf8_lossy(&output).contains("unique2"));
 
         args = args_default("s2/Common");
         args.patch = false;
+
         output.clear();
 
-        run_cli(args, &config, &mut output)?;
+        run_cli(&args, &config, &mut output)?;
 
         let content = String::from_utf8_lossy(&output);
 
         assert!(content.contains("common2"));
         assert!(!content.contains("common1"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_soft_update_fetch() -> Result<()> {
+        let sandbox = tempdir()?;
+        let data_dir = tempdir()?;
+        let remote_path = data_dir.path().join("remote_repo");
+        let local_path = data_dir.path().join("local_repo");
+
+        fs::create_dir_all(&remote_path)?;
+
+        run_git!(
+            &remote_path,
+            ["init"],
+            ["config", "user.email", "test@example.com"],
+            ["config", "user.name", "test"],
+        );
+
+        fs::write(remote_path.join("Rust.gitignore"), "target/")?;
+        run_git!(&remote_path, ["add", "."], ["commit", "-m", "init"]);
+
+        let remote_url = format!("file://{}", remote_path.display());
+
+        let config = Config {
+            sources: vec![TemplateSource {
+                name: "default".to_string(),
+                url: remote_url.clone(),
+                path: local_path.clone(),
+            }],
+            db_path: data_dir.path().join("templates.redb"),
+            fst_path: data_dir.path().join("templates.fst"),
+            project_path: sandbox.path().to_path_buf(),
+        };
+
+        // 1. Initial Sync: Clones the remote repo.
+        let sync_manager = SyncManager::new(&config);
+        let outcomes = sync_manager.ensure_repos(false, false)?;
+        sync_manager.sync(&outcomes)?;
+
+        // Verify "Rust" template exists in database
+        {
+            let db = Database::open(&config.db_path)?;
+            let txn = db.begin_read()?;
+            let table = txn.open_table(TEMPLATES_TABLE)?;
+            
+            assert!(table.get("default/rust")?.is_some());
+            assert!(table.get("default/node")?.is_none());
+        }
+
+        // 2. Commit a new template to remote repo
+        fs::write(remote_path.join("Node.gitignore"), "node_modules/")?;
+        run_git!(&remote_path, ["add", "."], ["commit", "-m", "add node"]);
+
+        // 3. Trigger CLI run with update flag. This should fetch updates.
+        let mut args = args_default("");
+        args.update = true;
+        run_cli(&args, &config, Vec::new())?;
+
+        // 4. Verify "Node" template now exists in the database
+        {
+            let db = Database::open(&config.db_path)?;
+            let txn = db.begin_read()?;
+            let table = txn.open_table(TEMPLATES_TABLE)?;
+ 
+            assert!(table.get("default/rust")?.is_some());
+            assert!(table.get("default/node")?.is_some());
+            assert_eq!(table.get("default/node")?.unwrap().value(), "node_modules/");
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_force_update_rebuild() -> Result<()> {
+        let sandbox = tempdir()?;
+        let data_dir = tempdir()?;
+        let remote_path = data_dir.path().join("remote_repo");
+        let local_path = data_dir.path().join("local_repo");
+
+        fs::create_dir_all(&remote_path)?;
+
+        run_git!(
+            &remote_path,
+            ["init"],
+            ["config", "user.email", "test@example.com"],
+            ["config", "user.name", "test"],
+        );
+
+        fs::write(remote_path.join("Rust.gitignore"), "target/")?;
+        run_git!(&remote_path, ["add", "."], ["commit", "-m", "init"]);
+
+        let remote_url = format!("file://{}", remote_path.display());
+
+        let config = Config {
+            sources: vec![TemplateSource {
+                name: "default".to_string(),
+                url: remote_url.clone(),
+                path: local_path.clone(),
+            }],
+            db_path: data_dir.path().join("templates.redb"),
+            fst_path: data_dir.path().join("templates.fst"),
+            project_path: sandbox.path().to_path_buf(),
+        };
+
+        // 1. Initial Sync
+        let sync_manager = SyncManager::new(&config);
+        let outcomes = sync_manager.ensure_repos(false, false)?;
+        sync_manager.sync(&outcomes)?;
+
+        // 2. Perform a force update (this should delete local repo and rebuild from scratch)
+        let mut args = args_default("");
+        args.force = true;
+        run_cli(&args, &config, Vec::new())?;
+
+        // 3. Verify templates still exist in the database (indicating it cloned and indexed cleanly)
+        {
+            let db = Database::open(&config.db_path)?;
+            let txn = db.begin_read()?;
+            let table = txn.open_table(TEMPLATES_TABLE)?;
+            
+            assert!(table.get("default/rust")?.is_some());
+        }
 
         Ok(())
     }

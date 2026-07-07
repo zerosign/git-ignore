@@ -21,6 +21,10 @@ pub struct Config {
 }
 
 impl Config {
+    /// Resolves Config from environment variables and system directories.
+    ///
+    /// # Errors
+    /// Returns `ConfigError` if system data directory cannot be resolved or if parsing custom sources fails.
     pub fn from_env() -> Result<Self, ConfigError> {
         let data_dir = dirs::data_dir()
             .ok_or_else(|| ConfigError::Env("Could not resolve data directory".to_string()))?;
@@ -47,6 +51,7 @@ impl Config {
         );
 
         if !source_list_env.trim().is_empty() {
+
             let new_sources = source_list_env
                 .split(',')
                 .map(str::trim)
@@ -57,7 +62,7 @@ impl Config {
                     let url = url.trim().to_string();
 
                     if !name.is_empty() && !url.is_empty() {
-                        let path = base_path.join(format!("sources/{}", name));
+                        let path = base_path.join(format!("sources/{name}"));
                         Some((name.clone(), TemplateSource { name, url, path }))
                     } else {
                         eprintln!("Warning: invalid source format, expected name=url");
@@ -66,7 +71,7 @@ impl Config {
                 });
 
             sources.extend(new_sources);
-        };
+        }
 
         let sources = sources.values().cloned().collect();
 

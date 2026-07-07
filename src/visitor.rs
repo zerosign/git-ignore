@@ -12,6 +12,7 @@ impl Default for TemplateVisitor {
 }
 
 impl TemplateVisitor {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             path_stack: vec![],
@@ -20,6 +21,7 @@ impl TemplateVisitor {
     }
 
     // move the template
+    #[must_use]
     pub fn output(self) -> Vec<(String, gix::ObjectId)> {
         self.templates
     }
