@@ -22,7 +22,14 @@ use sync::SyncManager;
 
 use crate::action::{generate_template, list_templates, show_info};
 
-build_info::build_info!(fn show_version);
+fn show_version() -> String {
+    format!(
+        "git-ignore {} (commit: {}, built: {})",
+        env!("CARGO_PKG_VERSION"),
+        option_env!("VERGEN_GIT_SHA").unwrap_or("unknown"),
+        option_env!("VERGEN_BUILD_TIMESTAMP").unwrap_or("unknown")
+    )
+}
 
 /// Orchestrates the CLI execution flow based on parsed arguments and configuration.
 ///
@@ -136,6 +143,7 @@ mod tests {
             ["init"],
             ["config", "user.email", "test@example.com"],
             ["config", "user.name", "test"],
+            ["config", "commit.gpgsign", "false"],
         );
 
         fs::write(repo_path.join("Rust.gitignore"), "target/")?;
@@ -523,6 +531,7 @@ mod tests {
             ["init"],
             ["config", "user.email", "test@example.com"],
             ["config", "user.name", "test"],
+            ["config", "commit.gpgsign", "false"],
         );
 
         fs::write(remote_path.join("Rust.gitignore"), "target/")?;
@@ -593,6 +602,7 @@ mod tests {
             ["init"],
             ["config", "user.email", "test@example.com"],
             ["config", "user.name", "test"],
+            ["config", "commit.gpgsign", "false"],
         );
 
         fs::write(remote_path.join("Rust.gitignore"), "target/")?;
