@@ -7,23 +7,19 @@ license = "MIT"
 [dependencies]
 argh = "0.1"
 dirs = "6.0"
-gix = { version = "0.85", default-features = false, features = ["blocking-network-client", "worktree-mutation", "zlib-rs", "sha1", "sha256", "interrupt", "revision", "blob-diff"] }
+gix = { version = "0.87", default-features = false, features = ["blocking-network-client", "worktree-mutation", "sha1", "sha256", "interrupt", "revision", "blob-diff"] }
 thiserror = "2.0"
 redb = "4.1"
 fst = "0.4"
 tempfile = "3.10"
 sha2 = "0.11"
-build-info = "0.0.45"
 mimalloc = { version = "0.1", default-features = false }
 
 [build-dependencies]
-build-info-build = "0.0.45"
+vergen-gix = { version = "10.0", features = ["build", "cargo"] }
 
 [dev-dependencies]
 libc = "0.2.186"
-nix = { version = "0.31.3", features = ["ptrace", "process", "signal"] }
-os_pipe = "1.1"
-syscalls = "0.8.1"
 
 [features]
 default = ["debug-tls"]
