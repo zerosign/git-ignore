@@ -1,10 +1,11 @@
-use argh::FromArgs;
-use git_ignore::{Config, GitIgnoreArgs, run_cli};
-use mimalloc::MiMalloc;
-
-#[global_allocator]
-static GLOBAL: MiMalloc = MiMalloc;
-
+// use argh::FromArgs;
+use git_ignore::{Config, cli::GitIgnoreCli};
+use usage_rs::RunWith;
+// use mimalloc::MiMalloc;
+//
+// #[global_allocator]
+// static GLOBAL: MiMalloc = MiMalloc;
+//
 /// Entry point for the git-ignore CLI.
 ///
 /// **Logic:**
@@ -14,29 +15,10 @@ static GLOBAL: MiMalloc = MiMalloc;
 /// 4. Resolves the execution configuration (data paths, environment variables).
 /// 5. Executes the core CLI logic and reports any errors to the user.
 fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
-    // If no arguments provided (only the binary name), show help and exit cleanly.
-    if std::env::args().len() == 1 {
-        match GitIgnoreArgs::from_args(&["git-ignore"], &["--help"]) {
-            Ok(_) => unreachable!(),
-            Err(exit) => {
-                println!("{}", exit.output);
-                std::process::exit(i32::from(exit.status.is_err()));
-            }
-        }
-    }
-
-    // Handle CTRL+C gracefully for gix operations.
-    // Setting to 2 interrupts will cause an immediate hard exit on the second press.
-    // The first interrupt allows gix to try and stop ongoing network/file operations cleanly.
-    unsafe {
-        let _ = gix::interrupt::init_handler(2, || {});
-    }
-
-    let args: GitIgnoreArgs = argh::from_env();
+    let cli = GitIgnoreCli::parse();
     let config = Config::from_env()?;
 
-    // Core orchestration logic is separated into lib.rs for testability and reuse.
-    run_cli(&args, &config, std::io::stdout())?;
+    cli.command.run_with(config)?;
 
     Ok(())
 }
