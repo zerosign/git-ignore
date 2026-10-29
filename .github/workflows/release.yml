@@ -28,7 +28,8 @@ jobs:
             target: x86_64-pc-windows-msvc
             artifact_name: git-ignore.exe
             asset_name: git-ignore-x86_64-pc-windows-msvc.zip
-
+    permissions:
+      contents: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
