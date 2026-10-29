@@ -1,11 +1,8 @@
 use std::path::Path;
 
-use crate::{
-    TemplateSource,
-    error::SyncError,
-    result::Result,
-    sync::RepoStatus,
-};
+use gix::{ObjectId, Repository};
+
+use crate::{TemplateSource, error::SyncError, result::Result, sync::RepoStatus};
 
 #[derive(Debug)]
 pub enum RepoState {
@@ -14,6 +11,73 @@ pub enum RepoState {
     Corrupted,
     NeedsFetch,
     ForceReclone,
+}
+
+macro_rules! match_then {
+    ($expression:expr, $pattern:pat => $action:expr) => {
+        if matches!($expression, $pattern) {
+            $action;
+        }
+    };
+}
+
+fn fetch_remote(repo: &Repository) -> Result<Option<ObjectId>, SyncError> {
+    // 2. Find remote for that repo/source and fetch the latest updates from remote
+    //
+    // TODO: refactor this
+    //
+    let remote = repo
+        .find_remote("origin")
+        .map_err(|e| SyncError::GitOp(format!("Could not find remote 'origin': {e}")))?;
+
+    let connection = remote
+        .connect(gix::remote::Direction::Fetch)
+        .map_err(|e| SyncError::GitOp(format!("Connection failed: {e}")))?;
+
+    let _outcome = connection
+        .prepare_fetch(
+            &mut gix::progress::Discard,
+            gix::remote::ref_map::Options::default(),
+        )
+        .map_err(|e| SyncError::GitOp(format!("Prepare fetch failed: {e}")))?
+        .receive(&mut gix::progress::Discard, &gix::interrupt::IS_INTERRUPTED)
+        .map_err(|e| SyncError::GitOp(format!("Receive failed: {e}")))?;
+
+    let mut new_oid = None;
+
+    if let Ok(head) = repo.head()
+        && let Some(referent) = head.referent_name()
+        && let Some(short_name) = referent.as_bstr().strip_prefix(b"refs/heads/")
+    {
+        let remote_ref_name = format!(
+            "refs/remotes/origin/{}",
+            String::from_utf8_lossy(short_name)
+        );
+
+        if let Ok(remote_ref) = repo.find_reference(&remote_ref_name) {
+            let remote_oid = remote_ref.id();
+            new_oid = Some(remote_oid.detach());
+
+            let edit = gix::refs::transaction::RefEdit {
+                change: gix::refs::transaction::Change::Update {
+                    log: gix::refs::transaction::LogChange {
+                        mode: gix::refs::transaction::RefLog::AndReference,
+                        force_create_reflog: false,
+                        message: "update local branch to match remote tracking branch".into(),
+                    },
+                    expected: gix::refs::transaction::PreviousValue::Any,
+                    new: gix::refs::Target::Object(remote_oid.detach()),
+                },
+                name: referent.to_owned(),
+                deref: true,
+            };
+
+            repo.edit_reference(edit)
+                .map_err(|e| SyncError::GitOp(format!("Edit reference failed: {e}")))?;
+        }
+    }
+
+    Ok(new_oid)
 }
 
 impl RepoState {
@@ -40,11 +104,7 @@ impl RepoState {
         let path = &source.path;
 
         match RepoState::determine(path, update, force) {
-            RepoState::Valid => return Ok(RepoStatus::Matched),
-            RepoState::Missing => println!(
-                "Cloning gitignore templates repository [{}]...",
-                source.name
-            ),
+            RepoState::Valid => Ok(RepoStatus::Matched),
             RepoState::NeedsFetch => {
                 println!(
                     "Fetching updates for gitignore templates repository [{}]...",
@@ -53,64 +113,17 @@ impl RepoState {
 
                 let repo = gix::open(path)?;
 
-                let mut old_oid = None;
-                if let Ok(head) = repo.head()
-                    && let Some(id) = head.id()
-                {
-                    old_oid = Some(id.detach());
-                }
+                // 1. fetch current repo object id
+                let old_oid = repo
+                    .head()
+                    .ok()
+                    .and_then(|head| head.id())
+                    .map(|id| id.detach());
 
-                let remote = repo.find_remote("origin").map_err(|e| {
-                    SyncError::GitOp(format!("Could not find remote 'origin': {e}"))
-                })?;
-
-                let connection = remote
-                    .connect(gix::remote::Direction::Fetch)
-                    .map_err(|e| SyncError::GitOp(format!("Connection failed: {e}")))?;
-
-                let _outcome = connection
-                    .prepare_fetch(
-                        &mut gix::progress::Discard,
-                        gix::remote::ref_map::Options::default(),
-                    )
-                    .map_err(|e| SyncError::GitOp(format!("Prepare fetch failed: {e}")))?
-                    .receive(&mut gix::progress::Discard, &gix::interrupt::IS_INTERRUPTED)
-                    .map_err(|e| SyncError::GitOp(format!("Receive failed: {e}")))?;
-
-                let mut new_oid = None;
-
-                if let Ok(head) = repo.head()
-                    && let Some(referent) = head.referent_name()
-                    && let Some(short_name) = referent.as_bstr().strip_prefix(b"refs/heads/")
-                {
-                    let remote_ref_name = format!(
-                        "refs/remotes/origin/{}",
-                        String::from_utf8_lossy(short_name)
-                    );
-
-                    if let Ok(remote_ref) = repo.find_reference(&remote_ref_name) {
-                        let remote_oid = remote_ref.id();
-                        new_oid = Some(remote_oid.detach());
-
-                        let edit = gix::refs::transaction::RefEdit {
-                            change: gix::refs::transaction::Change::Update {
-                                log: gix::refs::transaction::LogChange {
-                                    mode: gix::refs::transaction::RefLog::AndReference,
-                                    force_create_reflog: false,
-                                    message: "update local branch to match remote tracking branch"
-                                        .into(),
-                                },
-                                expected: gix::refs::transaction::PreviousValue::Any,
-                                new: gix::refs::Target::Object(remote_oid.detach()),
-                            },
-                            name: referent.to_owned(),
-                            deref: true,
-                        };
-
-                        repo.edit_reference(edit)
-                            .map_err(|e| SyncError::GitOp(format!("Edit reference failed: {e}")))?;
-                    }
-                }
+                // 2. Find remote for that repo/source and fetch the latest updates from remote and
+                //    return new object id from updated worktree/head
+                //
+                let new_oid = fetch_remote(&repo)?;
 
                 if let (Some(old), Some(new)) = (old_oid, new_oid)
                     && old != new
@@ -121,30 +134,42 @@ impl RepoState {
                     });
                 }
 
-                return Ok(RepoStatus::Matched);
+                Ok(RepoStatus::Matched)
             }
-            RepoState::Corrupted | RepoState::ForceReclone => {
-                println!(
-                    "Refreshing gitignore templates repository [{}]...",
-                    source.name
+            st @ (RepoState::Missing | RepoState::Corrupted | RepoState::ForceReclone) => {
+                match_then!(
+                    st,
+                    RepoState::Corrupted | RepoState::ForceReclone => {
+                        let _ = std::fs::remove_dir_all(path);
+
+                        println!(
+                            "Updating gitignore templates repository [{}]...", source.name
+                        );
+                    }
                 );
 
-                let _ = std::fs::remove_dir_all(path);
+                match_then!(
+                    st, 
+                    RepoState::Missing => {
+                        println!("Cloning gitignore templates repository [{}]...", source.name);
+                    }
+                );
+
+                std::fs::create_dir_all(
+                    path.parent()
+                        .ok_or_else(|| SyncError::GitOp("Invalid templates path".to_string()))?,
+                )?;
+
+                let mut prepare =
+                    gix::prepare_clone_bare(source.url.as_str(), path).map_err(SyncError::from)?;
+
+                let (_checkout, _outcome) = prepare
+                    .fetch_only(gix::progress::Discard, &gix::interrupt::IS_INTERRUPTED)
+                    .map_err(SyncError::from)?;
+
+
+                Ok(RepoStatus::Recloned)
             }
         }
-
-        std::fs::create_dir_all(
-            path.parent()
-                .ok_or_else(|| SyncError::GitOp("Invalid templates path".to_string()))?,
-        )?;
-
-        let mut prepare =
-            gix::prepare_clone_bare(source.url.as_str(), path).map_err(SyncError::from)?;
-
-        let (_checkout, _outcome) = prepare
-            .fetch_only(gix::progress::Discard, &gix::interrupt::IS_INTERRUPTED)
-            .map_err(SyncError::from)?;
-
-        Ok(RepoStatus::Recloned)
     }
 }

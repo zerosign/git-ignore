@@ -7,7 +7,7 @@ use redb::{Database, ReadableDatabase, ReadableTable};
 use crate::{
     TemplateSource,
     config::Config,
-    defs::{METADATA_TABLE, TEMPLATES_OIDS_TABLE, TEMPLATES_TABLE},
+    tables::{METADATA_TABLE, TEMPLATES_OIDS_TABLE, TEMPLATES_TABLE},
     error::SyncError,
     result::Result,
     state::RepoState,
