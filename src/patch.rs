@@ -21,9 +21,11 @@
 //! - **Idempotency**: Running the same command multiple times results in the same file state.
 //! - **Deduplication**: It prevents the same template from being added multiple times.
 
+use core::fmt;
 use std::collections::HashMap;
 
-use crate::defs::{END_MARKER_PREFIX, START_MARKER_PREFIX};
+pub const START_MARKER_PREFIX: &str = "# git-ignore-start: ";
+pub const END_MARKER_PREFIX: &str = "# git-ignore-end: ";
 
 /// Represents a discrete section of a `.gitignore` file.
 #[derive(Debug, PartialEq, Eq)]
@@ -57,6 +59,19 @@ impl Block {
     }
 }
 
+pub struct Blocks(Vec<Block>);
+
+impl fmt::Display for Blocks {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // TODO: do this better in a way I think we can abstract the block then abstract the vec ?
+        for item in self.0.iter().filter_map(Block::render) {
+            writeln!(f, "{}", item)?;
+        }
+
+        Ok(())
+    }
+}
+
 /// A parser and serializer for block-based `.gitignore` management.
 pub struct Patcher {
     blocks: Vec<Block>,
@@ -65,7 +80,7 @@ pub struct Patcher {
 impl Patcher {
     /// Parses an existing `.gitignore` string into a sequence of [Block]s.
     ///
-    /// It recognizes the start and end markers defined in [`crate::defs`].
+    /// It recognizes the start and end markers defined in [`patch::START_MARKER_PREFIX`, `patch::END_MARKER_PREFIX`].
     /// Legacy markers are intentionally ignored and treated as custom content.
     #[must_use]
     pub fn parse(content: &str) -> Self {
@@ -112,25 +127,41 @@ impl Patcher {
         Self { blocks }
     }
 
-    /// Merges new template content into the parsed blocks.
+    /// Merges new template content into the parsed blocks. (Only can be called once, this move
+    /// things).
     ///
     /// If a [`Block::Managed`] section with a matching name (case-insensitive) exists,
     /// its content is updated. Otherwise, a new managed block is appended to the end.
-    pub fn patch(&mut self, new_templates: HashMap<String, String>) {
+    pub fn patch(mut self, new_templates: HashMap<String, String>) -> Option<Blocks> {
         // Pre-normalize templates for O(1) lookup while preserving original casing
         let mut templates: HashMap<String, (String, String)> = new_templates
             .into_iter()
             .map(|(k, v)| (k.to_lowercase(), (k, v)))
             .collect();
 
-        // 1. Update existing managed blocks
+        let mut updated = false;
+
+        // 1. Update existing managed blocks if new_content != content (but we still remove if there
+        //    is entry).
         for block in &mut self.blocks {
             if let Block::Managed { name, content } = block
                 && let Some((original_name, new_content)) = templates.remove(&name.to_lowercase())
+                && !new_content.eq(content)
             {
+                // mark that there is an update
+                updated = true;
+
                 *name = original_name; // Sync casing to the latest requested format
                 *content = new_content.trim().to_string();
             }
+        }
+
+        if !updated && templates.is_empty() {
+            return None;
+        }
+
+        if updated && templates.is_empty() {
+            return Some(Blocks(self.blocks));
         }
 
         // 2. Append new blocks for remaining templates
@@ -142,19 +173,8 @@ impl Patcher {
                     content: content.trim().to_string(),
                 }),
         );
-    }
 
-    /// Serializes the blocks back into a single string.
-    ///
-    /// This method ensures a consistent format with exactly one blank line between
-    /// blocks and clean trimming of managed content.
-    #[must_use]
-    pub fn serialize(&self) -> String {
-        self.blocks
-            .iter()
-            .filter_map(Block::render)
-            .collect::<Vec<_>>()
-            .join("\n")
+        Some(Blocks(self.blocks))
     }
 }
 
@@ -167,20 +187,30 @@ mod tests {
         let content = "node_modules/\n.env\n";
         let patcher = Patcher::parse(content);
 
-        assert_eq!(patcher.serialize(), content);
+        let patched = patcher.patch(HashMap::new());
+
+        assert!(patched.is_none());
+
+        let patched = patched.unwrap();
+        let result = format!("{}", patched);
+
+        assert_eq!(result, content);
     }
 
     #[test]
     fn test_patch_new_template() {
         let content = "custom_entry\n";
-        let mut patcher = Patcher::parse(content);
+        let patcher = Patcher::parse(content);
 
         let mut templates = HashMap::new();
 
         templates.insert("Rust".to_string(), "target/\n".to_string());
-        patcher.patch(templates);
+        let patched = patcher.patch(templates);
 
-        let result = patcher.serialize();
+        assert!(patched.is_some());
+
+        let patched = patched.unwrap();
+        let result = format!("{}", patched);
 
         assert!(result.contains("custom_entry"));
         assert!(result.contains(START_MARKER_PREFIX));
@@ -191,17 +221,18 @@ mod tests {
 
     #[test]
     fn test_patch_existing_template() {
-        let content = format!(
-            "{START_MARKER_PREFIX}Rust\nold_content\n{END_MARKER_PREFIX}Rust\n"
-        );
+        let content = format!("{START_MARKER_PREFIX}Rust\nold_content\n{END_MARKER_PREFIX}Rust\n");
 
-        let mut patcher = Patcher::parse(&content);
+        let patcher = Patcher::parse(&content);
         let mut templates = HashMap::new();
 
         templates.insert("Rust".to_string(), "new_content\n".to_string());
-        patcher.patch(templates);
+        let patched = patcher.patch(templates);
 
-        let result = patcher.serialize();
+        assert!(patched.is_some());
+
+        let patched = patched.unwrap();
+        let result = format!("{}", patched);
 
         assert!(!result.contains("old_content"));
         assert!(result.contains("new_content"));
