@@ -5,7 +5,8 @@ It specifically looks at how to use [redb](https://github.com/cberner/redb) for 
 without the usual overhead.
 
 > [!WARNING]
-> This is a **pet project** of mine. I'm using it to learn and experiment with optimizations, so it's definitely **not** meant for production use or anything mission critical so please use it at your own risk!
+> This is a **pet project** of mine. I'm using it to learn and experiment with optimizations, so it's definitely **not** meant for production use or 
+> anything mission critical so please use it at your own risk!
 
 ## Why build this?
 
@@ -20,19 +21,26 @@ it simple :').
 
 - `templates` : the key is lowercase namespaced template name and value is the template content.
 
-- `template_oids`: the key is same as above but the content is oid of the git file commit. This is being used for checking whether there is an update or not when traversing the git diff walks for that template.
+- `template_oids`: the key is same as above but the content is oid of the git file commit. This is being used for checking whether 
+   there is an update or not when traversing the git diff walks for that template.
 
-- `metadata` : the key is `last_commit_hash:${source_name}` and the value is worktree head oid. This is to check whether our pinned worktree is changed or not (whether the remote head points to new oid or not). if yes then we traverse walk the diff of the git from current oid to remote oid.
+- `metadata` : the key is `last_commit_hash:${source_name}` and the value is worktree head oid. This is to check whether our pinned worktree is changed or not 
+  (whether the remote head points to new oid or not). if yes then we traverse walk the diff of the git from current oid to remote oid.
 
 
 ## Assumptions
 
 I made a few assumptions about what makes a CLI tool fast on Linux, and then I tested them:
 
-1.  **Reduce number of syscalls**: I assume that reducing syscall is quite important here because of cli tool like this are heavily dealing with rapid 
-    teardown during each cli invocations. Having an efficient program that do less syscall seems to be good number i guess.
-2.  **Static Linking**: I built the tool with `musl` so it's a completely standalone file. It's a bit larger, but it doesn't have to look for libraries on your system when it starts up.
-3.  **Memory Mapping**: I relied on the OS to handle the heavy lifting of reading the database file into memory, which seems a lot more efficient for this kind of work.
+1.  **Reduce number of syscalls**: I assume that reducing syscall is quite important here because of cli tool like this 
+    are heavily dealing with rapid teardown during each cli invocations. Having an efficient program that do less syscall 
+    seems to be good number i guess.
+
+2.  **Static Linking**: I built the tool with `musl` so it's a completely standalone file. It's a bit larger, but it doesn't have to 
+    look for libraries on your system when it starts up.
+
+3.  **Memory Mapping**: I relied on the OS to handle the heavy lifting of reading the database file into memory, which seems a 
+    lot more efficient for this kind of work.
 
 ### What I measured (on my machine)
 
