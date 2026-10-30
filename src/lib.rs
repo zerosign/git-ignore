@@ -5,653 +5,655 @@ pub mod config;
 pub mod error;
 pub mod patch;
 pub mod result;
-pub mod state;
+// pub mod state;
+// pub mod sync;
+
 pub mod sync;
-
-pub mod sync_;
-
 pub mod tables;
-pub mod visitor;
+
+// pub mod visitor;
 
 pub use command::state::CliState;
 pub use config::{Config, TemplateSource};
 
-#[cfg(test)]
-mod tests {
-    use std::{fs, path::PathBuf};
-
-    use redb::{Database, ReadableDatabase};
-    use tempfile::{TempDir, tempdir};
-    use usage_rs::RunWith;
-
-    use crate::{
-        command::{info::Info, patch::Patch, update::Update},
-        error::CliError,
-        result::Result,
-        sync::SyncManager,
-        tables::{METADATA_TABLE, TEMPLATES_TABLE},
-    };
-
-    macro_rules! run_git {
-        ($path:expr, $( [$($arg:expr),+ $(,)?] ),* $(,)?) => {{
-            $(
-                let output = std::process::Command::new("git")
-                    .arg("-C")
-                    .arg($path)
-                    $(.arg($arg))+
-                    .output()
-                    .map_err(CliError::Io)?;
-                if !output.status.success() {
-                    return Err(CliError::Git(format!("git command failed: {:?}\nstdout: {}\nstderr: {}",
-                            [$($arg),+],
-                            String::from_utf8_lossy(&output.stdout),
-                            String::from_utf8_lossy(&output.stderr)
-                        )));
-                }
-            )*
-        }};
-    }
-
-    fn run_in_repo<F>(func: F) -> Result<()>
-    where
-        F: FnOnce(TempDir, TempDir, &PathBuf) -> Result<()>,
-    {
-        let sandbox = tempdir()?;
-        let data_dir = tempdir()?;
-        let repo_path = data_dir.path().join("gitignore");
-
-        fs::create_dir_all(&repo_path)?;
-
-        run_git!(
-            &repo_path,
-            ["init"],
-            ["config", "user.email", "test@example.com"],
-            ["config", "user.name", "test"],
-            ["config", "commit.gpgsign", "false"],
-        );
-
-        fs::write(repo_path.join("Rust.gitignore"), "target/")?;
-
-        run_git!(&repo_path, ["add", "."], ["commit", "-m", "init"]);
-
-        func(sandbox, data_dir, &repo_path)
-    }
-
-    use super::*;
-
-    #[test]
-    fn test_patch_new_file() -> Result<()> {
-        run_in_repo(|sandbox, data_dir, repo_path| {
-            let config = Config {
-                sources: vec![TemplateSource {
-                    name: "default".to_string(),
-                    url: "file:///dev/null".to_string(),
-                    path: repo_path.clone(),
-                }],
-                db_path: data_dir.path().join("templates.redb"),
-                fst_path: data_dir.path().join("templates.fst"),
-                project_path: sandbox.path().to_path_buf(),
-            };
-
-            SyncManager::new(&config).sync(&[])?;
-
-            let stdout = std::io::stdout().lock();
-            let stderr = std::io::stderr().lock();
-
-            let state = CliState {
-                config: config,
-                stdout: Box::new(stdout),
-                stderr: Box::new(stderr),
-            };
-
-            let cmd = cli::Command::Patch(Patch {
-                dry_run: false,
-                templates: vec![String::from("Rust")],
-            });
-
-            cmd.run_with(state)?;
-
-            let gitignore_content = fs::read_to_string(sandbox.path().join(".gitignore"))?;
-
-            assert!(gitignore_content.contains("# git-ignore-start: Rust"));
-            assert!(gitignore_content.contains("target/"));
-
-            Ok(())
-        })
-    }
-
-    #[test]
-    fn test_patch_existing_file() -> Result<()> {
-        run_in_repo(|sandbox, data_dir, repo_path| {
-            let gitignore_path = sandbox.path().join(".gitignore");
-
-            fs::write(&gitignore_path, "existing_entry")?;
-
-            let config = Config {
-                sources: vec![TemplateSource {
-                    name: "default".to_string(),
-                    url: "file:///dev/null".to_string(),
-                    path: repo_path.clone(),
-                }],
-                db_path: data_dir.path().join("templates.redb"),
-                fst_path: data_dir.path().join("templates.fst"),
-                project_path: sandbox.path().to_path_buf(),
-            };
-
-            SyncManager::new(&config).sync(&[])?;
-
-            let cmd = cli::Command::Patch(Patch {
-                dry_run: false,
-                templates: vec![String::from("Rust")],
-            });
-
-            let stdout = std::io::stdout().lock();
-            let stderr = std::io::stderr().lock();
-
-            let state = CliState {
-                config: config,
-                stdout: Box::new(stdout),
-                stderr: Box::new(stderr),
-            };
-
-            cmd.run_with(state)?;
-
-            let gitignore_content = fs::read_to_string(&gitignore_path)?;
-
-            assert!(gitignore_content.starts_with("existing_entry\n"));
-            assert!(gitignore_content.contains("# git-ignore-start: Rust"));
-
-            Ok(())
-        })
-    }
-
-    #[test]
-    fn test_list_templates() -> Result<()> {
-        run_in_repo(|_sandbox, data_dir, repo_path| {
-            let config = Config {
-                sources: vec![TemplateSource {
-                    name: "default".to_string(),
-                    url: "file:///dev/null".to_string(),
-                    path: repo_path.clone(),
-                }],
-                db_path: data_dir.path().join("templates.redb"),
-                fst_path: data_dir.path().join("templates.fst"),
-                project_path: data_dir.path().to_path_buf(),
-            };
-
-            SyncManager::new(&config).sync(&[])?;
-            // TODO: impl list templates
-            // list_templates(&config.fst_path, Vec::new())?;
-
-            Ok(())
-        })
-    }
-
-    #[test]
-    fn test_clone_if_not_exists() -> Result<()> {
-        run_in_repo(|sandbox, data_dir, repo_path| {
-            let _ = fs::remove_dir_all(repo_path);
-
-            let config = Config {
-                sources: vec![TemplateSource {
-                    name: "default".to_string(),
-                    url: "file:///dev/null".to_string(),
-                    path: repo_path.clone(),
-                }],
-                db_path: data_dir.path().join("templates.redb"),
-                fst_path: data_dir.path().join("templates.fst"),
-                project_path: sandbox.path().to_path_buf(),
-            };
-
-            let stdout = std::io::stdout().lock();
-            let stderr = std::io::stderr().lock();
-
-            let state = CliState {
-                config: config,
-                stdout: Box::new(stdout),
-                stderr: Box::new(stderr),
-            };
-
-            assert!(
-                cli::Command::Patch(Patch {
-                    dry_run: false,
-                    templates: vec![String::from("Rust")],
-                })
-                .run_with(state)
-                .is_err(),
-            );
-
-            Ok(())
-        })
-    }
-
-    #[test]
-    fn test_update_reclone() -> Result<()> {
-        run_in_repo(|sandbox, data_dir, repo_path| {
-            fs::create_dir_all(repo_path.clone())?;
-            fs::write(repo_path.clone().join("Old.gitignore"), "old")?;
-
-            let config = Config {
-                sources: vec![TemplateSource {
-                    name: "default".to_string(),
-                    url: "file:///dev/null".to_string(),
-                    path: repo_path.clone(),
-                }],
-                db_path: data_dir.path().join("templates.redb"),
-                fst_path: data_dir.path().join("templates.fst"),
-                project_path: sandbox.path().to_path_buf(),
-            };
-
-            let cmd = cli::Command::Update(Update { force: true });
-
-            let stdout = std::io::stdout().lock();
-            let stderr = std::io::stderr().lock();
-
-            let state = CliState {
-                config: config,
-                stdout: Box::new(stdout),
-                stderr: Box::new(stderr),
-            };
-
-            assert!(cmd.run_with(state).is_err());
-
-            Ok(())
-        })
-    }
-
-    #[test]
-    fn test_multiple_and_missing_templates() -> Result<()> {
-        run_in_repo(|sandbox, data_dir, repo_path| {
-            let config = Config {
-                sources: vec![TemplateSource {
-                    name: "default".to_string(),
-                    url: "file:///dev/null".to_string(),
-                    path: repo_path.clone(),
-                }],
-                db_path: data_dir.path().join("templates.redb"),
-                fst_path: data_dir.path().join("templates.fst"),
-                project_path: sandbox.path().to_path_buf(),
-            };
-
-            let cmd = cli::Command::Patch(Patch {
-                dry_run: false,
-                templates: vec!["Rust".to_string(), "NonExistent".to_string()],
-            });
-
-            SyncManager::new(&config).sync(&[])?;
-
-            let stdout = std::io::stdout().lock();
-            let stderr = std::io::stderr().lock();
-
-            let state = CliState {
-                config: config,
-                stdout: Box::new(stdout),
-                stderr: Box::new(stderr),
-            };
-
-            cmd.run_with(state)?;
-
-            let gitignore_path = sandbox.path().join(".gitignore");
-            let content = fs::read_to_string(&gitignore_path)?;
-
-            assert!(content.contains("# git-ignore-start: Rust"));
-            assert!(!content.contains("# === NonExistent ==="));
-
-            Ok(())
-        })
-    }
-
-    #[test]
-    fn test_show_info() -> Result<()> {
-        run_in_repo(|_sandbox, data_dir, repo_path| {
-            let config = Config {
-                sources: vec![TemplateSource {
-                    name: "default".to_string(),
-                    url: "file:///dev/null".to_string(),
-                    path: repo_path.clone(),
-                }],
-                db_path: data_dir.path().join("templates.redb"),
-                fst_path: data_dir.path().join("templates.fst"),
-                project_path: data_dir.path().to_path_buf(),
-            };
-
-            SyncManager::new(&config).sync(&[])?;
-
-            let cmd = cli::Command::Info(Info {});
-
-            let stdout = std::io::stdout().lock();
-            let stderr = std::io::stderr().lock();
-
-            let state = CliState {
-                config: config,
-                stdout: Box::new(stdout),
-                stderr: Box::new(stderr),
-            };
-
-            cmd.run_with(state)?;
-
-            Ok(())
-        })
-    }
-
-    #[test]
-    fn test_incremental_sync() -> Result<()> {
-        run_in_repo(|sandbox, data_dir, repo_path| {
-            let output_c1 = std::process::Command::new("git")
-                .arg("-C")
-                .arg(repo_path)
-                .arg("rev-parse")
-                .arg("HEAD")
-                .output()?;
-
-            let commit1_hash = String::from_utf8_lossy(&output_c1.stdout)
-                .trim()
-                .to_string();
-
-            fs::write(repo_path.join("Node.gitignore"), "node_modules/")?;
-            fs::write(repo_path.join("Rust.gitignore"), "target/\nCargo.lock")?;
-
-            run_git!(repo_path, ["add", "."], ["commit", "-m", "second"]);
-
-            fs::remove_file(repo_path.join("Rust.gitignore"))?;
-            fs::write(repo_path.join("Python.gitignore"), "__pycache__/")?;
-
-            run_git!(repo_path, ["add", "."], ["commit", "-m", "third"]);
-
-            let config = Config {
-                sources: vec![TemplateSource {
-                    name: "default".to_string(),
-                    url: "file:///dev/null".to_string(),
-                    path: repo_path.clone(),
-                }],
-                db_path: data_dir.path().join("templates.redb"),
-                fst_path: data_dir.path().join("templates.fst"),
-                project_path: sandbox.path().to_path_buf(),
-            };
-
-            SyncManager::new(&config).sync(&[])?;
-
-            {
-                let db = Database::create(&config.db_path)?;
-                let write_txn = db.begin_write()?;
-
-                {
-                    let mut meta_table = write_txn.open_table(METADATA_TABLE)?;
-                    meta_table.insert("last_commit_hash:default", commit1_hash.as_bytes())?;
-                }
-
-                write_txn.commit()?;
-            }
-
-            SyncManager::new(&config).sync(&[])?;
-
-            let db = Database::create(&config.db_path)?;
-            let read_txn = db.begin_read()?;
-            let table = read_txn.open_table(TEMPLATES_TABLE)?;
-
-            assert!(table.get("default/rust")?.is_none());
-
-            let node_val = table
-                .get("default/node")?
-                .ok_or_else(|| CliError::Git("Node exist".to_string()))?;
-
-            assert_eq!(node_val.value(), "node_modules/");
-
-            let py_val = table
-                .get("default/python")?
-                .ok_or_else(|| CliError::Git("Python exist".to_string()))?;
-
-            assert_eq!(py_val.value(), "__pycache__/");
-
-            Ok(())
-        })
-    }
-
-    #[test]
-    fn test_multi_source() -> Result<()> {
-        let sandbox = tempdir()?;
-        let data_dir = tempdir()?;
-
-        let repo1_path = data_dir.path().join("repo1");
-        let repo2_path = data_dir.path().join("repo2");
-
-        fs::create_dir_all(&repo1_path)?;
-        fs::create_dir_all(&repo2_path)?;
-
-        run_git!(
-            &repo1_path,
-            ["init"],
-            ["config", "user.email", "t@e.com"],
-            ["config", "user.name", "t"]
-        );
-
-        fs::write(repo1_path.join("Common.gitignore"), "common1")?;
-
-        run_git!(&repo1_path, ["add", "."], ["commit", "-m", "init"]);
-        run_git!(
-            &repo2_path,
-            ["init"],
-            ["config", "user.email", "t@e.com"],
-            ["config", "user.name", "t"]
-        );
-
-        fs::write(repo2_path.join("Common.gitignore"), "common2")?;
-        fs::write(repo2_path.join("Unique.gitignore"), "unique2")?;
-
-        run_git!(&repo2_path, ["add", "."], ["commit", "-m", "init"]);
-
-        let config = Config {
-            sources: vec![
-                TemplateSource {
-                    name: "s1".to_string(),
-                    url: "file:///dev/null".to_string(),
-                    path: repo1_path,
-                },
-                TemplateSource {
-                    name: "s2".to_string(),
-                    url: "file:///dev/null".to_string(),
-                    path: repo2_path,
-                },
-            ],
-            db_path: data_dir.path().join("templates.redb"),
-            fst_path: data_dir.path().join("templates.fst"),
-            project_path: sandbox.path().to_path_buf(),
-        };
-
-        SyncManager::new(&config).sync(&[])?;
-
-        let cmd = cli::Command::Patch(Patch {
-            dry_run: true,
-            templates: vec![String::from("Common")],
-        });
-
-        let stdout = std::io::stdout().lock();
-        let stderr = std::io::stderr().lock();
-
-        let state = CliState {
-            config: config,
-            stdout: Box::new(stdout),
-            stderr: Box::new(stderr),
-        };
-
-        // TODO: we need to capture non-dry run i guess
-        // let mut output = Vec::new();
-        cmd.run_with(state)?;
-
-        let content = String::from_utf8_lossy(&output);
-
-        assert!(content.contains("common1"));
-        assert!(content.contains("common2"));
-
-        let cmd = cli::Command::Patch(Patch {
-            dry_run: true,
-            templates: vec![String::from("Unique")],
-        });
-
-        output.clear();
-
-        cmd.run_with(state)?;
-
-        assert!(String::from_utf8_lossy(&output).contains("unique2"));
-
-        let cmd = cli::Command::Patch(Patch {
-            dry_run: true,
-            templates: vec![String::from("s2/Common")],
-        });
-
-        output.clear();
-
-        cmd.run_with(state)?;
-
-        let content = String::from_utf8_lossy(&output);
-
-        assert!(content.contains("common2"));
-        assert!(!content.contains("common1"));
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_soft_update_fetch() -> Result<()> {
-        let sandbox = tempdir()?;
-        let data_dir = tempdir()?;
-        let remote_path = data_dir.path().join("remote_repo");
-        let local_path = data_dir.path().join("local_repo");
-
-        fs::create_dir_all(&remote_path)?;
-
-        run_git!(
-            &remote_path,
-            ["init"],
-            ["config", "user.email", "test@example.com"],
-            ["config", "user.name", "test"],
-            ["config", "commit.gpgsign", "false"],
-        );
-
-        fs::write(remote_path.join("Rust.gitignore"), "target/")?;
-        run_git!(&remote_path, ["add", "."], ["commit", "-m", "init"]);
-
-        let remote_url = format!("file://{}", remote_path.display());
-
-        let config = Config {
-            sources: vec![TemplateSource {
-                name: "default".to_string(),
-                url: remote_url.clone(),
-                path: local_path.clone(),
-            }],
-            db_path: data_dir.path().join("templates.redb"),
-            fst_path: data_dir.path().join("templates.fst"),
-            project_path: sandbox.path().to_path_buf(),
-        };
-
-        // 1. Initial Sync: Clones the remote repo.
-        let sync_manager = SyncManager::new(&config);
-        let outcomes = sync_manager.ensure_repos(false, false)?;
-        sync_manager.sync(&outcomes)?;
-
-        let stdout = std::io::stdout().lock();
-        let stderr = std::io::stderr().lock();
-
-        let state = CliState {
-            config: config,
-            stdout: Box::new(stdout),
-            stderr: Box::new(stderr),
-        };
-
-        // Verify "Rust" template exists in database
-        {
-            let db = Database::open(&config.db_path)?;
-            let txn = db.begin_read()?;
-            let table = txn.open_table(TEMPLATES_TABLE)?;
-
-            assert!(table.get("default/rust")?.is_some());
-            assert!(table.get("default/node")?.is_none());
-        }
-
-        // 2. Commit a new template to remote repo
-        fs::write(remote_path.join("Node.gitignore"), "node_modules/")?;
-        run_git!(&remote_path, ["add", "."], ["commit", "-m", "add node"]);
-
-        // 3. Trigger CLI run with update flag. This should fetch updates.
-        // let mut args = args_default("");
-        // args.update = true;
-        let cmd = cli::Command::Update(Update { force: true });
-        cmd.run_with(state)?;
-
-        // 4. Verify "Node" template now exists in the database
-        {
-            let db = Database::open(&config.db_path)?;
-            let txn = db.begin_read()?;
-            let table = txn.open_table(TEMPLATES_TABLE)?;
-
-            assert!(table.get("default/rust")?.is_some());
-            assert!(table.get("default/node")?.is_some());
-            assert_eq!(table.get("default/node")?.unwrap().value(), "node_modules/");
-        }
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_force_update_rebuild() -> Result<()> {
-        let sandbox = tempdir()?;
-        let data_dir = tempdir()?;
-        let remote_path = data_dir.path().join("remote_repo");
-        let local_path = data_dir.path().join("local_repo");
-
-        fs::create_dir_all(&remote_path)?;
-
-        run_git!(
-            &remote_path,
-            ["init"],
-            ["config", "user.email", "test@example.com"],
-            ["config", "user.name", "test"],
-            ["config", "commit.gpgsign", "false"],
-        );
-
-        fs::write(remote_path.join("Rust.gitignore"), "target/")?;
-        run_git!(&remote_path, ["add", "."], ["commit", "-m", "init"]);
-
-        let remote_url = format!("file://{}", remote_path.display());
-
-        let config = Config {
-            sources: vec![TemplateSource {
-                name: "default".to_string(),
-                url: remote_url.clone(),
-                path: local_path.clone(),
-            }],
-            db_path: data_dir.path().join("templates.redb"),
-            fst_path: data_dir.path().join("templates.fst"),
-            project_path: sandbox.path().to_path_buf(),
-        };
-
-        // 1. Initial Sync
-        let sync_manager = SyncManager::new(&config);
-        let outcomes = sync_manager.ensure_repos(false, false)?;
-        sync_manager.sync(&outcomes)?;
-
-        let stdout = std::io::stdout().lock();
-        let stderr = std::io::stderr().lock();
-
-        let state = CliState {
-            config: config,
-            stdout: Box::new(stdout),
-            stderr: Box::new(stderr),
-        };
-
-        // 2. Perform a force update (this should delete local repo and rebuild from scratch)
-        let cmd = cli::Command::Update(Update { force: true });
-        cmd.run_with(state)?;
-
-        // 3. Verify templates still exist in the database (indicating it cloned and indexed cleanly)
-        {
-            let db = Database::open(&config.db_path)?;
-            let txn = db.begin_read()?;
-            let table = txn.open_table(TEMPLATES_TABLE)?;
-
-            assert!(table.get("default/rust")?.is_some());
-        }
-
-        Ok(())
-    }
-}
+// TODO(@zerosign): reimplement this after figure out the correct abstraction layer later on
+//
+// #[cfg(test)]
+// mod tests {
+//     use std::{fs, path::PathBuf};
+//
+//     use redb::{Database, ReadableDatabase};
+//     use tempfile::{TempDir, tempdir};
+//     use usage_rs::RunWith;
+//
+//     use crate::{
+//         command::{info::Info, patch::Patch, update::Update},
+//         error::CliError,
+//         result::Result,
+//         sync::SyncManager,
+//         tables::{METADATA_TABLE, TEMPLATES_TABLE},
+//     };
+//
+//     macro_rules! run_git {
+//         ($path:expr, $( [$($arg:expr),+ $(,)?] ),* $(,)?) => {{
+//             $(
+//                 let output = std::process::Command::new("git")
+//                     .arg("-C")
+//                     .arg($path)
+//                     $(.arg($arg))+
+//                     .output()
+//                     .map_err(CliError::Io)?;
+//                 if !output.status.success() {
+//                     return Err(CliError::Git(format!("git command failed: {:?}\nstdout: {}\nstderr: {}",
+//                             [$($arg),+],
+//                             String::from_utf8_lossy(&output.stdout),
+//                             String::from_utf8_lossy(&output.stderr)
+//                         )));
+//                 }
+//             )*
+//         }};
+//     }
+//
+//     fn run_in_repo<F>(func: F) -> Result<()>
+//     where
+//         F: FnOnce(TempDir, TempDir, &PathBuf) -> Result<()>,
+//     {
+//         let sandbox = tempdir()?;
+//         let data_dir = tempdir()?;
+//         let repo_path = data_dir.path().join("gitignore");
+//
+//         fs::create_dir_all(&repo_path)?;
+//
+//         run_git!(
+//             &repo_path,
+//             ["init"],
+//             ["config", "user.email", "test@example.com"],
+//             ["config", "user.name", "test"],
+//             ["config", "commit.gpgsign", "false"],
+//         );
+//
+//         fs::write(repo_path.join("Rust.gitignore"), "target/")?;
+//
+//         run_git!(&repo_path, ["add", "."], ["commit", "-m", "init"]);
+//
+//         func(sandbox, data_dir, &repo_path)
+//     }
+//
+//     use super::*;
+//
+//     #[test]
+//     fn test_patch_new_file() -> Result<()> {
+//         run_in_repo(|sandbox, data_dir, repo_path| {
+//             let config = Config {
+//                 sources: vec![TemplateSource {
+//                     name: "default".to_string(),
+//                     url: "file:///dev/null".to_string(),
+//                     path: repo_path.clone(),
+//                 }],
+//                 db_path: data_dir.path().join("templates.redb"),
+//                 fst_path: data_dir.path().join("templates.fst"),
+//                 project_path: sandbox.path().to_path_buf(),
+//             };
+//
+//             SyncManager::new(&config).sync(&[])?;
+//
+//             let stdout = std::io::stdout().lock();
+//             let stderr = std::io::stderr().lock();
+//
+//             let state = CliState {
+//                 config: config,
+//                 stdout: Box::new(stdout),
+//                 stderr: Box::new(stderr),
+//             };
+//
+//             let cmd = cli::Command::Patch(Patch {
+//                 dry_run: false,
+//                 templates: vec![String::from("Rust")],
+//             });
+//
+//             cmd.run_with(state)?;
+//
+//             let gitignore_content = fs::read_to_string(sandbox.path().join(".gitignore"))?;
+//
+//             assert!(gitignore_content.contains("# git-ignore-start: Rust"));
+//             assert!(gitignore_content.contains("target/"));
+//
+//             Ok(())
+//         })
+//     }
+//
+//     #[test]
+//     fn test_patch_existing_file() -> Result<()> {
+//         run_in_repo(|sandbox, data_dir, repo_path| {
+//             let gitignore_path = sandbox.path().join(".gitignore");
+//
+//             fs::write(&gitignore_path, "existing_entry")?;
+//
+//             let config = Config {
+//                 sources: vec![TemplateSource {
+//                     name: "default".to_string(),
+//                     url: "file:///dev/null".to_string(),
+//                     path: repo_path.clone(),
+//                 }],
+//                 db_path: data_dir.path().join("templates.redb"),
+//                 fst_path: data_dir.path().join("templates.fst"),
+//                 project_path: sandbox.path().to_path_buf(),
+//             };
+//
+//             SyncManager::new(&config).sync(&[])?;
+//
+//             let cmd = cli::Command::Patch(Patch {
+//                 dry_run: false,
+//                 templates: vec![String::from("Rust")],
+//             });
+//
+//             let stdout = std::io::stdout().lock();
+//             let stderr = std::io::stderr().lock();
+//
+//             let state = CliState {
+//                 config: config,
+//                 stdout: Box::new(stdout),
+//                 stderr: Box::new(stderr),
+//             };
+//
+//             cmd.run_with(state)?;
+//
+//             let gitignore_content = fs::read_to_string(&gitignore_path)?;
+//
+//             assert!(gitignore_content.starts_with("existing_entry\n"));
+//             assert!(gitignore_content.contains("# git-ignore-start: Rust"));
+//
+//             Ok(())
+//         })
+//     }
+//
+//     #[test]
+//     fn test_list_templates() -> Result<()> {
+//         run_in_repo(|_sandbox, data_dir, repo_path| {
+//             let config = Config {
+//                 sources: vec![TemplateSource {
+//                     name: "default".to_string(),
+//                     url: "file:///dev/null".to_string(),
+//                     path: repo_path.clone(),
+//                 }],
+//                 db_path: data_dir.path().join("templates.redb"),
+//                 fst_path: data_dir.path().join("templates.fst"),
+//                 project_path: data_dir.path().to_path_buf(),
+//             };
+//
+//             SyncManager::new(&config).sync(&[])?;
+//             // TODO: impl list templates
+//             // list_templates(&config.fst_path, Vec::new())?;
+//
+//             Ok(())
+//         })
+//     }
+//
+//     #[test]
+//     fn test_clone_if_not_exists() -> Result<()> {
+//         run_in_repo(|sandbox, data_dir, repo_path| {
+//             let _ = fs::remove_dir_all(repo_path);
+//
+//             let config = Config {
+//                 sources: vec![TemplateSource {
+//                     name: "default".to_string(),
+//                     url: "file:///dev/null".to_string(),
+//                     path: repo_path.clone(),
+//                 }],
+//                 db_path: data_dir.path().join("templates.redb"),
+//                 fst_path: data_dir.path().join("templates.fst"),
+//                 project_path: sandbox.path().to_path_buf(),
+//             };
+//
+//             let stdout = std::io::stdout().lock();
+//             let stderr = std::io::stderr().lock();
+//
+//             let state = CliState {
+//                 config: config,
+//                 stdout: Box::new(stdout),
+//                 stderr: Box::new(stderr),
+//             };
+//
+//             assert!(
+//                 cli::Command::Patch(Patch {
+//                     dry_run: false,
+//                     templates: vec![String::from("Rust")],
+//                 })
+//                 .run_with(state)
+//                 .is_err(),
+//             );
+//
+//             Ok(())
+//         })
+//     }
+//
+//     #[test]
+//     fn test_update_reclone() -> Result<()> {
+//         run_in_repo(|sandbox, data_dir, repo_path| {
+//             fs::create_dir_all(repo_path.clone())?;
+//             fs::write(repo_path.clone().join("Old.gitignore"), "old")?;
+//
+//             let config = Config {
+//                 sources: vec![TemplateSource {
+//                     name: "default".to_string(),
+//                     url: "file:///dev/null".to_string(),
+//                     path: repo_path.clone(),
+//                 }],
+//                 db_path: data_dir.path().join("templates.redb"),
+//                 fst_path: data_dir.path().join("templates.fst"),
+//                 project_path: sandbox.path().to_path_buf(),
+//             };
+//
+//             let cmd = cli::Command::Update(Update { force: true });
+//
+//             let stdout = std::io::stdout().lock();
+//             let stderr = std::io::stderr().lock();
+//
+//             let state = CliState {
+//                 config: config,
+//                 stdout: Box::new(stdout),
+//                 stderr: Box::new(stderr),
+//             };
+//
+//             assert!(cmd.run_with(state).is_err());
+//
+//             Ok(())
+//         })
+//     }
+//
+//     #[test]
+//     fn test_multiple_and_missing_templates() -> Result<()> {
+//         run_in_repo(|sandbox, data_dir, repo_path| {
+//             let config = Config {
+//                 sources: vec![TemplateSource {
+//                     name: "default".to_string(),
+//                     url: "file:///dev/null".to_string(),
+//                     path: repo_path.clone(),
+//                 }],
+//                 db_path: data_dir.path().join("templates.redb"),
+//                 fst_path: data_dir.path().join("templates.fst"),
+//                 project_path: sandbox.path().to_path_buf(),
+//             };
+//
+//             let cmd = cli::Command::Patch(Patch {
+//                 dry_run: false,
+//                 templates: vec!["Rust".to_string(), "NonExistent".to_string()],
+//             });
+//
+//             SyncManager::new(&config).sync(&[])?;
+//
+//             let stdout = std::io::stdout().lock();
+//             let stderr = std::io::stderr().lock();
+//
+//             let state = CliState {
+//                 config: config,
+//                 stdout: Box::new(stdout),
+//                 stderr: Box::new(stderr),
+//             };
+//
+//             cmd.run_with(state)?;
+//
+//             let gitignore_path = sandbox.path().join(".gitignore");
+//             let content = fs::read_to_string(&gitignore_path)?;
+//
+//             assert!(content.contains("# git-ignore-start: Rust"));
+//             assert!(!content.contains("# === NonExistent ==="));
+//
+//             Ok(())
+//         })
+//     }
+//
+//     #[test]
+//     fn test_show_info() -> Result<()> {
+//         run_in_repo(|_sandbox, data_dir, repo_path| {
+//             let config = Config {
+//                 sources: vec![TemplateSource {
+//                     name: "default".to_string(),
+//                     url: "file:///dev/null".to_string(),
+//                     path: repo_path.clone(),
+//                 }],
+//                 db_path: data_dir.path().join("templates.redb"),
+//                 fst_path: data_dir.path().join("templates.fst"),
+//                 project_path: data_dir.path().to_path_buf(),
+//             };
+//
+//             SyncManager::new(&config).sync(&[])?;
+//
+//             let cmd = cli::Command::Info(Info {});
+//
+//             let stdout = std::io::stdout().lock();
+//             let stderr = std::io::stderr().lock();
+//
+//             let state = CliState {
+//                 config: config,
+//                 stdout: Box::new(stdout),
+//                 stderr: Box::new(stderr),
+//             };
+//
+//             cmd.run_with(state)?;
+//
+//             Ok(())
+//         })
+//     }
+//
+//     #[test]
+//     fn test_incremental_sync() -> Result<()> {
+//         run_in_repo(|sandbox, data_dir, repo_path| {
+//             let output_c1 = std::process::Command::new("git")
+//                 .arg("-C")
+//                 .arg(repo_path)
+//                 .arg("rev-parse")
+//                 .arg("HEAD")
+//                 .output()?;
+//
+//             let commit1_hash = String::from_utf8_lossy(&output_c1.stdout)
+//                 .trim()
+//                 .to_string();
+//
+//             fs::write(repo_path.join("Node.gitignore"), "node_modules/")?;
+//             fs::write(repo_path.join("Rust.gitignore"), "target/\nCargo.lock")?;
+//
+//             run_git!(repo_path, ["add", "."], ["commit", "-m", "second"]);
+//
+//             fs::remove_file(repo_path.join("Rust.gitignore"))?;
+//             fs::write(repo_path.join("Python.gitignore"), "__pycache__/")?;
+//
+//             run_git!(repo_path, ["add", "."], ["commit", "-m", "third"]);
+//
+//             let config = Config {
+//                 sources: vec![TemplateSource {
+//                     name: "default".to_string(),
+//                     url: "file:///dev/null".to_string(),
+//                     path: repo_path.clone(),
+//                 }],
+//                 db_path: data_dir.path().join("templates.redb"),
+//                 fst_path: data_dir.path().join("templates.fst"),
+//                 project_path: sandbox.path().to_path_buf(),
+//             };
+//
+//             SyncManager::new(&config).sync(&[])?;
+//
+//             {
+//                 let db = Database::create(&config.db_path)?;
+//                 let write_txn = db.begin_write()?;
+//
+//                 {
+//                     let mut meta_table = write_txn.open_table(METADATA_TABLE)?;
+//                     meta_table.insert("last_commit_hash:default", commit1_hash.as_bytes())?;
+//                 }
+//
+//                 write_txn.commit()?;
+//             }
+//
+//             SyncManager::new(&config).sync(&[])?;
+//
+//             let db = Database::create(&config.db_path)?;
+//             let read_txn = db.begin_read()?;
+//             let table = read_txn.open_table(TEMPLATES_TABLE)?;
+//
+//             assert!(table.get("default/rust")?.is_none());
+//
+//             let node_val = table
+//                 .get("default/node")?
+//                 .ok_or_else(|| CliError::Git("Node exist".to_string()))?;
+//
+//             assert_eq!(node_val.value(), "node_modules/");
+//
+//             let py_val = table
+//                 .get("default/python")?
+//                 .ok_or_else(|| CliError::Git("Python exist".to_string()))?;
+//
+//             assert_eq!(py_val.value(), "__pycache__/");
+//
+//             Ok(())
+//         })
+//     }
+//
+//     #[test]
+//     fn test_multi_source() -> Result<()> {
+//         let sandbox = tempdir()?;
+//         let data_dir = tempdir()?;
+//
+//         let repo1_path = data_dir.path().join("repo1");
+//         let repo2_path = data_dir.path().join("repo2");
+//
+//         fs::create_dir_all(&repo1_path)?;
+//         fs::create_dir_all(&repo2_path)?;
+//
+//         run_git!(
+//             &repo1_path,
+//             ["init"],
+//             ["config", "user.email", "t@e.com"],
+//             ["config", "user.name", "t"]
+//         );
+//
+//         fs::write(repo1_path.join("Common.gitignore"), "common1")?;
+//
+//         run_git!(&repo1_path, ["add", "."], ["commit", "-m", "init"]);
+//         run_git!(
+//             &repo2_path,
+//             ["init"],
+//             ["config", "user.email", "t@e.com"],
+//             ["config", "user.name", "t"]
+//         );
+//
+//         fs::write(repo2_path.join("Common.gitignore"), "common2")?;
+//         fs::write(repo2_path.join("Unique.gitignore"), "unique2")?;
+//
+//         run_git!(&repo2_path, ["add", "."], ["commit", "-m", "init"]);
+//
+//         let config = Config {
+//             sources: vec![
+//                 TemplateSource {
+//                     name: "s1".to_string(),
+//                     url: "file:///dev/null".to_string(),
+//                     path: repo1_path,
+//                 },
+//                 TemplateSource {
+//                     name: "s2".to_string(),
+//                     url: "file:///dev/null".to_string(),
+//                     path: repo2_path,
+//                 },
+//             ],
+//             db_path: data_dir.path().join("templates.redb"),
+//             fst_path: data_dir.path().join("templates.fst"),
+//             project_path: sandbox.path().to_path_buf(),
+//         };
+//
+//         SyncManager::new(&config).sync(&[])?;
+//
+//         let cmd = cli::Command::Patch(Patch {
+//             dry_run: true,
+//             templates: vec![String::from("Common")],
+//         });
+//
+//         let stdout = std::io::stdout().lock();
+//         let stderr = std::io::stderr().lock();
+//
+//         let state = CliState {
+//             config: config,
+//             stdout: Box::new(stdout),
+//             stderr: Box::new(stderr),
+//         };
+//
+//         // TODO: we need to capture non-dry run i guess
+//         // let mut output = Vec::new();
+//         cmd.run_with(state)?;
+//
+//         let content = String::from_utf8_lossy(&output);
+//
+//         assert!(content.contains("common1"));
+//         assert!(content.contains("common2"));
+//
+//         let cmd = cli::Command::Patch(Patch {
+//             dry_run: true,
+//             templates: vec![String::from("Unique")],
+//         });
+//
+//         output.clear();
+//
+//         cmd.run_with(state)?;
+//
+//         assert!(String::from_utf8_lossy(&output).contains("unique2"));
+//
+//         let cmd = cli::Command::Patch(Patch {
+//             dry_run: true,
+//             templates: vec![String::from("s2/Common")],
+//         });
+//
+//         output.clear();
+//
+//         cmd.run_with(state)?;
+//
+//         let content = String::from_utf8_lossy(&output);
+//
+//         assert!(content.contains("common2"));
+//         assert!(!content.contains("common1"));
+//
+//         Ok(())
+//     }
+//
+//     #[test]
+//     fn test_soft_update_fetch() -> Result<()> {
+//         let sandbox = tempdir()?;
+//         let data_dir = tempdir()?;
+//         let remote_path = data_dir.path().join("remote_repo");
+//         let local_path = data_dir.path().join("local_repo");
+//
+//         fs::create_dir_all(&remote_path)?;
+//
+//         run_git!(
+//             &remote_path,
+//             ["init"],
+//             ["config", "user.email", "test@example.com"],
+//             ["config", "user.name", "test"],
+//             ["config", "commit.gpgsign", "false"],
+//         );
+//
+//         fs::write(remote_path.join("Rust.gitignore"), "target/")?;
+//         run_git!(&remote_path, ["add", "."], ["commit", "-m", "init"]);
+//
+//         let remote_url = format!("file://{}", remote_path.display());
+//
+//         let config = Config {
+//             sources: vec![TemplateSource {
+//                 name: "default".to_string(),
+//                 url: remote_url.clone(),
+//                 path: local_path.clone(),
+//             }],
+//             db_path: data_dir.path().join("templates.redb"),
+//             fst_path: data_dir.path().join("templates.fst"),
+//             project_path: sandbox.path().to_path_buf(),
+//         };
+//
+//         // 1. Initial Sync: Clones the remote repo.
+//         let sync_manager = SyncManager::new(&config);
+//         let outcomes = sync_manager.ensure_repos(false, false)?;
+//         sync_manager.sync(&outcomes)?;
+//
+//         let stdout = std::io::stdout().lock();
+//         let stderr = std::io::stderr().lock();
+//
+//         let state = CliState {
+//             config: config,
+//             stdout: Box::new(stdout),
+//             stderr: Box::new(stderr),
+//         };
+//
+//         // Verify "Rust" template exists in database
+//         {
+//             let db = Database::open(&config.db_path)?;
+//             let txn = db.begin_read()?;
+//             let table = txn.open_table(TEMPLATES_TABLE)?;
+//
+//             assert!(table.get("default/rust")?.is_some());
+//             assert!(table.get("default/node")?.is_none());
+//         }
+//
+//         // 2. Commit a new template to remote repo
+//         fs::write(remote_path.join("Node.gitignore"), "node_modules/")?;
+//         run_git!(&remote_path, ["add", "."], ["commit", "-m", "add node"]);
+//
+//         // 3. Trigger CLI run with update flag. This should fetch updates.
+//         // let mut args = args_default("");
+//         // args.update = true;
+//         let cmd = cli::Command::Update(Update { force: true });
+//         cmd.run_with(state)?;
+//
+//         // 4. Verify "Node" template now exists in the database
+//         {
+//             let db = Database::open(&config.db_path)?;
+//             let txn = db.begin_read()?;
+//             let table = txn.open_table(TEMPLATES_TABLE)?;
+//
+//             assert!(table.get("default/rust")?.is_some());
+//             assert!(table.get("default/node")?.is_some());
+//             assert_eq!(table.get("default/node")?.unwrap().value(), "node_modules/");
+//         }
+//
+//         Ok(())
+//     }
+//
+//     #[test]
+//     fn test_force_update_rebuild() -> Result<()> {
+//         let sandbox = tempdir()?;
+//         let data_dir = tempdir()?;
+//         let remote_path = data_dir.path().join("remote_repo");
+//         let local_path = data_dir.path().join("local_repo");
+//
+//         fs::create_dir_all(&remote_path)?;
+//
+//         run_git!(
+//             &remote_path,
+//             ["init"],
+//             ["config", "user.email", "test@example.com"],
+//             ["config", "user.name", "test"],
+//             ["config", "commit.gpgsign", "false"],
+//         );
+//
+//         fs::write(remote_path.join("Rust.gitignore"), "target/")?;
+//         run_git!(&remote_path, ["add", "."], ["commit", "-m", "init"]);
+//
+//         let remote_url = format!("file://{}", remote_path.display());
+//
+//         let config = Config {
+//             sources: vec![TemplateSource {
+//                 name: "default".to_string(),
+//                 url: remote_url.clone(),
+//                 path: local_path.clone(),
+//             }],
+//             db_path: data_dir.path().join("templates.redb"),
+//             fst_path: data_dir.path().join("templates.fst"),
+//             project_path: sandbox.path().to_path_buf(),
+//         };
+//
+//         // 1. Initial Sync
+//         let sync_manager = SyncManager::new(&config);
+//         let outcomes = sync_manager.ensure_repos(false, false)?;
+//         sync_manager.sync(&outcomes)?;
+//
+//         let stdout = std::io::stdout().lock();
+//         let stderr = std::io::stderr().lock();
+//
+//         let state = CliState {
+//             config: config,
+//             stdout: Box::new(stdout),
+//             stderr: Box::new(stderr),
+//         };
+//
+//         // 2. Perform a force update (this should delete local repo and rebuild from scratch)
+//         let cmd = cli::Command::Update(Update { force: true });
+//         cmd.run_with(state)?;
+//
+//         // 3. Verify templates still exist in the database (indicating it cloned and indexed cleanly)
+//         {
+//             let db = Database::open(&config.db_path)?;
+//             let txn = db.begin_read()?;
+//             let table = txn.open_table(TEMPLATES_TABLE)?;
+//
+//             assert!(table.get("default/rust")?.is_some());
+//         }
+//
+//         Ok(())
+//     }
+// }

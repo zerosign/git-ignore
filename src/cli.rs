@@ -1,10 +1,8 @@
-use std::io;
+use usage_rs::{Cli, Subcommands};
 
-use usage_rs::{Args, Cli, Run, Subcommands};
-
-use crate::{Config, command::{
+use crate::command::{
     compact::Compact, info::Info, list::List, patch::Patch, update::Update, version::Version,
-}};
+};
 //
 // pub struct CliState {
 //     config: Config,

@@ -19,7 +19,7 @@ impl RunWith<CliState> for Update {
             let _ = gix::interrupt::init_handler(2, || {});
         }
 
-        use crate::sync_ as sync;
+        use crate::sync;
 
         sync::sync(&ctx.config, self.force)?;
 
