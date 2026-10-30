@@ -84,17 +84,30 @@ pub fn ensure_fail(source: &TemplateSource, force: bool) -> Repository {
 
     match gix::open(path) {
         Ok(repo) => {
+            let packed_lock = path.join("packed-refs.lock");
+            if packed_lock.exists() {
+                let _ = std::fs::remove_file(packed_lock);
+            }
+
             // Fetch latest commits from origin into local branches
+            let default_branch = repo
+                .head()
+                .ok()
+                .and_then(|h| h.referent_name().map(|r| r.to_string()))
+                .or_else(|| repo.find_reference("refs/heads/main").ok().map(|r| r.name().to_string()))
+                .or_else(|| repo.find_reference("refs/heads/master").ok().map(|r| r.name().to_string()))
+                .expect("fails to resolve default branch");
+
+            let branch = source.branch.as_deref().unwrap_or(&default_branch);
+            let refspec = format!("+{branch}:{branch}");
+
             let remote = repo
                 .find_remote("origin")
                 .expect("fails to find remote origin");
 
             let remote = remote
                 .with_refspecs(
-                    [
-                        "+refs/heads/*:refs/heads/*", // Mirrors all branches
-                        "+refs/tags/*:refs/tags/*",   // Mirrors all tags
-                    ],
+                    [refspec.as_str()],
                     gix::remote::Direction::Fetch,
                 )
                 .expect("fails to set refspecs");
@@ -120,26 +133,14 @@ pub fn ensure_fail(source: &TemplateSource, force: bool) -> Repository {
             let mut op = gix::prepare_clone_bare(source.url.as_str(), path)
                 .expect("fails to clone the bare repo");
 
-            op = op.configure_remote(|remote| {
-                // https://git-scm.com/book/en/v2/Git-Internals-The-Refspec
-                //
-                // so this means every fetch will update respected local index
-                // this should be safe since we don't do update from local repo
-                //
-                // This simplify a lot of things, so technically after this we can assume
-                // all local oid in the repo that being tracked already on the newest oid.
-                //
-                remote
-                    .with_refspecs(
-                        [
-                            "+refs/heads/*:refs/heads/*", // Mirrors all branches
-                            "+refs/tags/*:refs/tags/*",   // Mirrors all tags
-                        ],
-                        gix::remote::Direction::Fetch,
-                    )
-                    .map_err(Into::into)
-            });
-
+            // https://git-scm.com/book/en/v2/Git-Internals-The-Refspec
+            //
+            // so this means every fetch will update respected local index
+            // this should be safe since we don't do update from local repo
+            //
+            // This simplify a lot of things, so technically after this we can assume
+            // all local oid in the repo that being tracked already on the newest oid.
+            //
             let (repo, _) = op
                 .fetch_only(gix::progress::Discard, &gix::interrupt::IS_INTERRUPTED)
                 .expect("fail to fetch the repo");
@@ -225,6 +226,8 @@ pub fn sync(config: &Config, force: bool) -> Result<(), SyncError> {
             Database::create(&config.db_path).expect("fails to open db")
         }
     };
+
+    let mut has_changes = false;
 
     for source in &config.sources {
         // TODO: better to do retry for this
@@ -326,6 +329,8 @@ pub fn sync(config: &Config, force: bool) -> Result<(), SyncError> {
         }
         // We know have every changes that need to be populated in upserts & deletes
 
+        has_changes = has_changes || !deletes.is_empty() || !upserts.is_empty();
+
         let wtx = db.begin_write().expect("fails to do write tx");
 
         {
@@ -376,6 +381,12 @@ pub fn sync(config: &Config, force: bool) -> Result<(), SyncError> {
         }
 
         wtx.commit().expect("fails to delete");
+    }
+
+    let reindex = has_changes || !config.cache_path.exists();
+
+    if !reindex {
+        return Ok(());
     }
 
     let rtx = db.begin_read().expect("fails to read only");

@@ -15,6 +15,7 @@ pub struct TemplateSource {
     pub name: String,
     pub url: String,
     pub path: PathBuf,
+    pub branch: Option<String>,
 }
 
 impl TemplateSource {
@@ -80,6 +81,7 @@ impl Config {
                 name: String::from("default"),
                 url: String::from(DEFAULT_REPO_URL),
                 path: source_path.join("default"),
+                branch: None,
             },
         );
 
@@ -97,12 +99,18 @@ impl Config {
                 if !name.is_empty() && !url.is_empty() {
                     let path = source_path.join(name);
 
+                    let (clean_url, branch) = url
+                        .split_once('#')
+                        .map(|(u, b)| (u.trim(), Some(format!("refs/heads/{}", b.trim()))))
+                        .unwrap_or((url, None));
+
                     Some((
                         String::from(name),
                         TemplateSource {
                             name: String::from(name),
-                            url: String::from(url),
+                            url: String::from(clean_url),
                             path: path,
+                            branch: branch,
                         },
                     ))
                 } else {

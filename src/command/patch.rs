@@ -151,7 +151,7 @@ impl RunWith<CliState> for Patch {
             templates,
             &ctx.config.sources,
             &ctx.config.project_path,
-            self.dry_run,
+            !self.dry_run,
             ctx.stdout,
         )?;
 
