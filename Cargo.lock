@@ -762,6 +762,7 @@ dependencies = [
  "fst",
  "gix",
  "libc",
+ "memmap2",
  "redb",
  "rkyv",
  "sha2",
