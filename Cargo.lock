@@ -759,7 +759,6 @@ dependencies = [
  "redb",
  "rkyv",
  "sha2",
- "tempfile",
  "thiserror",
  "usage-rs",
  "vergen-gix",
