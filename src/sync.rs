@@ -120,6 +120,7 @@ impl<'a> SyncUpdater<'a> {
                     | Change::Rewrite { location, id, .. } => (location, Some(id.detach())),
                     Change::Deletion { location, .. } => (location, None),
                 };
+
                 if location.ends_with(b".gitignore") {
                     let name = location
                         .strip_suffix(b".gitignore")
@@ -252,6 +253,7 @@ impl<'a> SyncManager<'a> {
     /// # Errors
     /// Returns `SyncError` if opening the database, computing repository updates, or committing writes fails.
     pub fn sync(&self, outcomes: &[(String, RepoStatus)]) -> Result<(), SyncError> {
+
         // 1. Open Database
         let db = if let Ok(db) = Database::create(&self.config.db_path) {
             db
@@ -386,6 +388,10 @@ impl<'a> SyncManager<'a> {
                 meta_table.insert(key.as_str(), head_oid.to_string().as_bytes())?;
             }
 
+            // TODO: replace this with rkyv cache instead
+
+            
+
             // Generate FST
             let mut names: Vec<String> = table
                 .iter()?
@@ -396,6 +402,8 @@ impl<'a> SyncManager<'a> {
                 .collect();
 
             names.sort();
+
+            // TODO: currently we're using fst only for storage, need to use something else
 
             let mut builder = SetBuilder::memory();
 

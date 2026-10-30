@@ -1,3 +1,5 @@
+use std::path;
+
 use gix::{bstr::BString, traverse::tree::visit::Action as VisitAction};
 
 pub struct TemplateVisitor {
@@ -48,7 +50,7 @@ impl gix::traverse::tree::Visit for TemplateVisitor {
         let filename = entry.filename;
 
         if filename.ends_with(b".gitignore") {
-            let name_str = self
+            let path = self
                 .path_stack
                 .iter()
                 .map(|p| {
@@ -58,7 +60,7 @@ impl gix::traverse::tree::Visit for TemplateVisitor {
                 .collect::<Vec<_>>()
                 .join("/");
 
-            self.templates.push((name_str, entry.oid.to_owned()));
+            self.templates.push((path, entry.oid.to_owned()));
         }
 
         VisitAction::Continue(false)

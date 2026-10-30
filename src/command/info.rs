@@ -1,9 +1,9 @@
-use std::io::{self, Write};
+use std::io::{Write};
 
 use redb::ReadableTableMetadata;
 use usage_rs::{Args, RunWith};
 
-use crate::{Config, error::{InfoError, SyncError}, tables::TEMPLATES_TABLE};
+use crate::{Config, command::state::CliState, error::{InfoError, SyncError}, tables::TEMPLATES_TABLE};
 
 #[derive(Args, Debug)]
 pub struct Info;
@@ -66,10 +66,10 @@ pub fn show_info<D: redb::ReadableDatabase, W: Write>(
     Ok(())
 }
 
-impl RunWith<Config> for Info {
+impl RunWith<CliState> for Info {
     type Output = crate::result::Result<()>;
 
-    fn run_with(self, ctx: Config) -> Self::Output {
+    fn run_with(self, ctx: CliState) -> Self::Output {
         // Handle CTRL+C gracefully for gix operations.
         // Setting to 2 interrupts will cause an immediate hard exit on the second press.
         // The first interrupt allows gix to try and stop ongoing network/file operations cleanly.
@@ -78,12 +78,10 @@ impl RunWith<Config> for Info {
         }
 
         let db = redb::Builder::new()
-            .open_read_only(&ctx.db_path)
+            .open_read_only(&ctx.config.db_path)
             .map_err(SyncError::from)?;
 
-        let stdout = io::stdout();
-
-        show_info(&ctx, &db, stdout.lock())?;
+        show_info(&ctx.config, &db, ctx.stdout)?;
 
         Ok(())
     }

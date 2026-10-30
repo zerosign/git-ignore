@@ -1,9 +1,17 @@
-use std::{collections::{HashMap, HashSet}, fs, io, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    fs, io,
+    path::Path,
+};
 
 use usage_rs::{Args, RunWith};
 
 use crate::{
-    Config, TemplateSource, error::{CliError, GenerateError, SyncError}, patch::Patcher, tables::{METADATA_TABLE, TEMPLATES_TABLE},
+    TemplateSource,
+    command::state::CliState,
+    error::{CliError, GenerateError, SyncError},
+    patch::Patcher,
+    tables::{METADATA_TABLE, TEMPLATES_TABLE},
 };
 
 #[derive(Args, Debug)]
@@ -41,11 +49,14 @@ pub fn collect_templates<D: redb::ReadableDatabase, S: std::hash::BuildHasher>(
     for name in names {
         // 1. Map the template to the potential database keys we need to check
         let keys = match name.split_once('/') {
-            Some((source, name)) => vec![TemplateSource::key_of(source, name)],
-            None => sources
-                .iter()
-                .map(|s| TemplateSource::key_of(&s.name, &name))
-                .collect(),
+            Some((source, tname)) => vec![TemplateSource::key_of(source, &tname.to_lowercase())],
+            None => {
+                let lower = name.to_lowercase();
+                sources
+                    .iter()
+                    .map(|s| TemplateSource::key_of(&s.name, &lower))
+                    .collect()
+            }
         };
 
         // 2. Fetch and aggregate all matching template contents
@@ -66,8 +77,6 @@ pub fn collect_templates<D: redb::ReadableDatabase, S: std::hash::BuildHasher>(
 
     Ok(contents)
 }
-
-
 
 /// Generates the .gitignore output by assembling and optional patching of templates.
 ///
@@ -97,10 +106,8 @@ pub fn generate_template<
     let fpath = target.as_ref().join(".gitignore");
 
     // read the content for the gitignore
-    let content = fpath
-        .exists()
-        .then(|| fs::read_to_string(&fpath).ok())
-        .flatten()
+    let content = fs::read_to_string(&fpath)
+        .ok()
         .unwrap_or_default();
 
     match (Patcher::parse(&content).patch(templates), patch) {
@@ -120,11 +127,11 @@ pub fn generate_template<
     Ok(())
 }
 
-impl RunWith<Config> for Patch {
+impl RunWith<CliState> for Patch {
     type Output = crate::result::Result<()>;
 
-    fn run_with(self, ctx: Config) -> Self::Output {
-        if !ctx.db_path.exists() {
+    fn run_with(self, ctx: CliState) -> Self::Output {
+        if !ctx.config.db_path.exists() {
             return Err(CliError::Discovery(
                 "Database not found. Run with -u first.".to_string(),
             ));
@@ -136,18 +143,16 @@ impl RunWith<Config> for Patch {
         let templates: HashSet<String> = HashSet::from_iter(templates.into_iter());
 
         let db = redb::Builder::new()
-            .open_read_only(&ctx.db_path)
+            .open_read_only(&ctx.config.db_path)
             .map_err(SyncError::from)?;
-
-        let stdout = std::io::stdout();
 
         generate_template(
             &db,
             templates,
-            &ctx.sources,
-            &ctx.project_path,
+            &ctx.config.sources,
+            &ctx.config.project_path,
             self.dry_run,
-            stdout.lock(),
+            ctx.stdout,
         )?;
 
         Ok(())

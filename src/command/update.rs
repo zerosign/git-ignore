@@ -1,8 +1,6 @@
-use std::io;
-
 use usage_rs::{Args, RunWith};
 
-use crate::{Config, sync::SyncManager};
+use crate::command::state::CliState;
 
 #[derive(Args, Debug)]
 pub struct Update {
@@ -10,11 +8,10 @@ pub struct Update {
     pub(crate) force: bool,
 }
 
-impl RunWith<Config> for Update {
+impl RunWith<CliState> for Update {
     type Output = crate::result::Result<()>;
 
-    fn run_with(self, ctx: Config) -> Self::Output {
-
+    fn run_with(self, ctx: CliState) -> Self::Output {
         // Handle CTRL+C gracefully for gix operations.
         // Setting to 2 interrupts will cause an immediate hard exit on the second press.
         // The first interrupt allows gix to try and stop ongoing network/file operations cleanly.
@@ -22,9 +19,10 @@ impl RunWith<Config> for Update {
             let _ = gix::interrupt::init_handler(2, || {});
         }
 
-        let sync = SyncManager::new(&ctx);
-        let outcomes = sync.ensure_repos(true, self.force)?;
-        sync.sync(&outcomes)?;
+        use crate::sync_ as sync;
+
+        sync::sync(&ctx.config, self.force)?;
+
         Ok(())
     }
 }

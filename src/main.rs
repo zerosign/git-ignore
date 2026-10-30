@@ -1,5 +1,7 @@
+use std::io::{self, BufWriter};
+
 // use argh::FromArgs;
-use git_ignore::{Config, cli::GitIgnoreCli};
+use git_ignore::{CliState, Config, cli::GitIgnoreCli};
 use usage_rs::RunWith;
 // use mimalloc::MiMalloc;
 //
@@ -18,7 +20,16 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let cli = GitIgnoreCli::parse();
     let config = Config::from_env()?;
 
-    cli.command.run_with(config)?;
+    let stdout = BufWriter::new(io::stdout().lock()); 
+    let stderr = BufWriter::new(io::stderr().lock());
+
+    let state = CliState {
+        config: config,
+        stdout: Box::new(stdout),
+        stderr: Box::new(stderr),
+    };
+
+    cli.command.run_with(state)?;
 
     Ok(())
 }

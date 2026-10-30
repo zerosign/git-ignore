@@ -1,20 +1,17 @@
-use std::io::{self, Write};
-
 use usage_rs::{Args, RunWith};
 
-use crate::Config;
+use crate::command::state::CliState;
 
 #[derive(Args, Debug)]
 pub struct Version;
 
-impl RunWith<Config> for Version {
+impl RunWith<CliState> for Version {
     type Output = crate::result::Result<()>;
 
-    fn run_with(self, _ctx: Config) -> Self::Output {
-        let stdout = io::stdout();
+    fn run_with(self, mut ctx: CliState) -> Self::Output {
 
         writeln!(
-            stdout.lock(),
+            ctx.stdout,
             "git-ignore {} (commit: {}, built: {})",
             env!("CARGO_PKG_VERSION"),
             option_env!("VERGEN_GIT_SHA").unwrap_or("unknown"),

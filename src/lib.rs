@@ -1,5 +1,3 @@
-use std::io::Write;
-
 pub mod cache;
 pub mod cli;
 pub mod command;
@@ -9,9 +7,13 @@ pub mod patch;
 pub mod result;
 pub mod state;
 pub mod sync;
+
+pub mod sync_;
+
 pub mod tables;
 pub mod visitor;
 
+pub use command::state::CliState;
 pub use config::{Config, TemplateSource};
 
 #[cfg(test)]
@@ -93,12 +95,21 @@ mod tests {
 
             SyncManager::new(&config).sync(&[])?;
 
+            let stdout = std::io::stdout().lock();
+            let stderr = std::io::stderr().lock();
+
+            let state = CliState {
+                config: config,
+                stdout: Box::new(stdout),
+                stderr: Box::new(stderr),
+            };
+
             let cmd = cli::Command::Patch(Patch {
                 dry_run: false,
                 templates: vec![String::from("Rust")],
             });
 
-            cmd.run_with(config)?;
+            cmd.run_with(state)?;
 
             let gitignore_content = fs::read_to_string(sandbox.path().join(".gitignore"))?;
 
@@ -134,7 +145,16 @@ mod tests {
                 templates: vec![String::from("Rust")],
             });
 
-            cmd.run_with(config)?;
+            let stdout = std::io::stdout().lock();
+            let stderr = std::io::stderr().lock();
+
+            let state = CliState {
+                config: config,
+                stdout: Box::new(stdout),
+                stderr: Box::new(stderr),
+            };
+
+            cmd.run_with(state)?;
 
             let gitignore_content = fs::read_to_string(&gitignore_path)?;
 
@@ -183,12 +203,21 @@ mod tests {
                 project_path: sandbox.path().to_path_buf(),
             };
 
+            let stdout = std::io::stdout().lock();
+            let stderr = std::io::stderr().lock();
+
+            let state = CliState {
+                config: config,
+                stdout: Box::new(stdout),
+                stderr: Box::new(stderr),
+            };
+
             assert!(
                 cli::Command::Patch(Patch {
                     dry_run: false,
                     templates: vec![String::from("Rust")],
                 })
-                .run_with(config)
+                .run_with(state)
                 .is_err(),
             );
 
@@ -215,7 +244,16 @@ mod tests {
 
             let cmd = cli::Command::Update(Update { force: true });
 
-            assert!(cmd.run_with(config).is_err());
+            let stdout = std::io::stdout().lock();
+            let stderr = std::io::stderr().lock();
+
+            let state = CliState {
+                config: config,
+                stdout: Box::new(stdout),
+                stderr: Box::new(stderr),
+            };
+
+            assert!(cmd.run_with(state).is_err());
 
             Ok(())
         })
@@ -242,7 +280,16 @@ mod tests {
 
             SyncManager::new(&config).sync(&[])?;
 
-            cmd.run_with(config)?;
+            let stdout = std::io::stdout().lock();
+            let stderr = std::io::stderr().lock();
+
+            let state = CliState {
+                config: config,
+                stdout: Box::new(stdout),
+                stderr: Box::new(stderr),
+            };
+
+            cmd.run_with(state)?;
 
             let gitignore_path = sandbox.path().join(".gitignore");
             let content = fs::read_to_string(&gitignore_path)?;
@@ -272,9 +319,16 @@ mod tests {
 
             let cmd = cli::Command::Info(Info {});
 
-            cmd.run_with(config)?;
+            let stdout = std::io::stdout().lock();
+            let stderr = std::io::stderr().lock();
 
-            // show_info(&config, &db, Vec::new())?;
+            let state = CliState {
+                config: config,
+                stdout: Box::new(stdout),
+                stderr: Box::new(stderr),
+            };
+
+            cmd.run_with(state)?;
 
             Ok(())
         })
@@ -411,9 +465,18 @@ mod tests {
             templates: vec![String::from("Common")],
         });
 
+        let stdout = std::io::stdout().lock();
+        let stderr = std::io::stderr().lock();
+
+        let state = CliState {
+            config: config,
+            stdout: Box::new(stdout),
+            stderr: Box::new(stderr),
+        };
+
         // TODO: we need to capture non-dry run i guess
         // let mut output = Vec::new();
-        cmd.run_with(config.clone())?;
+        cmd.run_with(state)?;
 
         let content = String::from_utf8_lossy(&output);
 
@@ -427,7 +490,7 @@ mod tests {
 
         output.clear();
 
-        cmd.run_with(config.clone())?;
+        cmd.run_with(state)?;
 
         assert!(String::from_utf8_lossy(&output).contains("unique2"));
 
@@ -438,7 +501,7 @@ mod tests {
 
         output.clear();
 
-        cmd.run_with(config)?;
+        cmd.run_with(state)?;
 
         let content = String::from_utf8_lossy(&output);
 
@@ -486,6 +549,15 @@ mod tests {
         let outcomes = sync_manager.ensure_repos(false, false)?;
         sync_manager.sync(&outcomes)?;
 
+        let stdout = std::io::stdout().lock();
+        let stderr = std::io::stderr().lock();
+
+        let state = CliState {
+            config: config,
+            stdout: Box::new(stdout),
+            stderr: Box::new(stderr),
+        };
+
         // Verify "Rust" template exists in database
         {
             let db = Database::open(&config.db_path)?;
@@ -504,7 +576,7 @@ mod tests {
         // let mut args = args_default("");
         // args.update = true;
         let cmd = cli::Command::Update(Update { force: true });
-        cmd.run_with(config.clone())?;
+        cmd.run_with(state)?;
 
         // 4. Verify "Node" template now exists in the database
         {
@@ -558,9 +630,18 @@ mod tests {
         let outcomes = sync_manager.ensure_repos(false, false)?;
         sync_manager.sync(&outcomes)?;
 
+        let stdout = std::io::stdout().lock();
+        let stderr = std::io::stderr().lock();
+
+        let state = CliState {
+            config: config,
+            stdout: Box::new(stdout),
+            stderr: Box::new(stderr),
+        };
+
         // 2. Perform a force update (this should delete local repo and rebuild from scratch)
         let cmd = cli::Command::Update(Update { force: true });
-        cmd.run_with(config.clone())?;
+        cmd.run_with(state)?;
 
         // 3. Verify templates still exist in the database (indicating it cloned and indexed cleanly)
         {
