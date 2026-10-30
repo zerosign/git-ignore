@@ -32,6 +32,7 @@ pub struct Config {
     pub sources: Vec<TemplateSource>,
     pub db_path: PathBuf,
     pub fst_path: PathBuf,
+    pub cache_path: PathBuf,
     pub project_path: PathBuf,
 }
 
@@ -119,11 +120,13 @@ impl Config {
 
         let db_path = base_path.join("templates.redb");
         let fst_path = base_path.join("templates.fst");
+        let cache_path = base_path.join("templates.rkyv");
 
         Ok(Self {
             sources,
             db_path,
             fst_path,
+            cache_path,
             project_path: std::env::current_dir()?,
         })
     }
