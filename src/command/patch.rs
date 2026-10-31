@@ -48,15 +48,12 @@ pub fn collect_templates<D: redb::ReadableDatabase, S: std::hash::BuildHasher>(
 
     for name in names {
         // 1. Map the template to the potential database keys we need to check
-        let keys = match name.split_once('/') {
-            Some((source, tname)) => vec![TemplateSource::key_of(source, &tname.to_lowercase())],
-            None => {
-                let lower = name.to_lowercase();
-                sources
-                    .iter()
-                    .map(|s| TemplateSource::key_of(&s.name, &lower))
-                    .collect()
-            }
+        let keys = if let Some((source, tname)) = name.split_once('/') { vec![TemplateSource::key_of(source, &tname.to_lowercase())] } else {
+            let lower = name.to_lowercase();
+            sources
+                .iter()
+                .map(|s| TemplateSource::key_of(&s.name, &lower))
+                .collect()
         };
 
         // 2. Fetch and aggregate all matching template contents
@@ -113,11 +110,11 @@ pub fn generate_template<
     match (Patcher::parse(&content).patch(templates), patch) {
         (Some(blocks), true) => {
             // TODO: this need to be better
-            fs::write(&fpath, format!("{}", blocks))?;
+            fs::write(&fpath, format!("{blocks}"))?;
             writeln!(writer, "Updated .gitignore")?;
         }
         (Some(blocks), false) => {
-            writeln!(writer, "{}", blocks)?;
+            writeln!(writer, "{blocks}")?;
         }
         _ => {
             writeln!(writer, ".gitignore is already up to date")?;
@@ -140,7 +137,7 @@ impl RunWith<CliState> for Patch {
         // TODO: need to resolve this without cloning i guess
         let templates = self.templates.clone();
 
-        let templates: HashSet<String> = HashSet::from_iter(templates.into_iter());
+        let templates: HashSet<String> = HashSet::from_iter(templates);
 
         let db = redb::Builder::new()
             .open_read_only(&ctx.config.db_path)

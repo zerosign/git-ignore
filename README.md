@@ -24,7 +24,7 @@ it simple :').
 - `template_oids`: the key is same as above but the content is oid of the git file commit. This is being used for checking whether 
    there is an update or not when traversing the git diff walks for that template.
 
-- `metadata` : the key is `last_commit_hash:${source_name}` and the value is worktree head oid. This is to check whether our pinned worktree is changed or not 
+- `metadata` : the key is `last_commit_hash:${source}` and the value is worktree head oid. This is to check whether our pinned worktree is changed or not 
   (whether the remote head points to new oid or not). if yes then we traverse walk the diff of the git from current oid to remote oid.
 
 

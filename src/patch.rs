@@ -65,7 +65,7 @@ impl fmt::Display for Blocks {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // TODO: do this better in a way I think we can abstract the block then abstract the vec ?
         for item in self.0.iter().filter_map(Block::render) {
-            writeln!(f, "{}", item)?;
+            writeln!(f, "{item}")?;
         }
 
         Ok(())
@@ -132,6 +132,7 @@ impl Patcher {
     ///
     /// If a [`Block::Managed`] section with a matching name (case-insensitive) exists,
     /// its content is updated. Otherwise, a new managed block is appended to the end.
+    #[must_use]
     pub fn patch(mut self, new_templates: HashMap<String, String>) -> Option<Blocks> {
         // Pre-normalize templates for O(1) lookup while preserving original casing
         let mut templates: HashMap<String, (String, String)> = new_templates

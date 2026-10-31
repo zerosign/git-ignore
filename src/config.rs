@@ -19,12 +19,27 @@ pub struct TemplateSource {
 }
 
 impl TemplateSource {
+    #[must_use]
     pub fn version_key(&self) -> String {
         format!("last_commit_hash:{}", self.name)
     }
 
+    #[must_use]
     pub fn key_of(source: &str, name: &str) -> String {
         format!("{}/{}", source, name.to_lowercase())
+    }
+
+    #[must_use]
+    pub fn key_of_loc(source: &str, path: &[u8]) -> Option<String> {
+        if !path.ends_with(b".gitignore") {
+            return None;
+        }
+
+        let filename = path.rsplit(|&b| b == b'/').next().unwrap_or(path);
+        let stem = filename.strip_suffix(b".gitignore").unwrap_or(filename);
+        let name = String::from_utf8_lossy(stem).to_lowercase();
+
+        Some(TemplateSource::key_of(source, &name))
     }
 }
 
@@ -52,6 +67,7 @@ fn format_file_hash(path: &Path) -> Option<String> {
 }
 
 impl Config {
+    #[must_use]
     pub fn checksum(&self) -> (Option<String>, Option<String>) {
         (
             format_file_hash(&self.db_path),
@@ -109,8 +125,8 @@ impl Config {
                         TemplateSource {
                             name: String::from(name),
                             url: String::from(clean_url),
-                            path: path,
-                            branch: branch,
+                            path,
+                            branch,
                         },
                     ))
                 } else {

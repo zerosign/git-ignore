@@ -24,7 +24,7 @@ impl<'a> Iterator for CacheIter<'a> {
     type Item = &'a str;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.inner.next().map(|s| s.as_str())
+        self.inner.next().map(rkyv::string::ArchivedString::as_str)
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -32,7 +32,7 @@ impl<'a> Iterator for CacheIter<'a> {
     }
 }
 
-impl<'a> ExactSizeIterator for CacheIter<'a> {}
+impl ExactSizeIterator for CacheIter<'_> {}
 
 // Implements `for name in &cache`
 impl<'a> IntoIterator for &'a Templates {
@@ -95,6 +95,6 @@ impl FileCached {
         }
 
         // Ok(cache.names)
-        Ok(Templates { mmap: mmap })
+        Ok(Templates { mmap })
     }
 }

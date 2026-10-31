@@ -14,7 +14,7 @@ impl RunWith<CliState> for List {
         })?;
 
         for item in &templates {
-            writeln!(ctx.stdout, "{}", item)?;
+            writeln!(ctx.stdout, "{item}")?;
         }
 
         Ok(())

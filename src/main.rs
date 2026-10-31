@@ -24,7 +24,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let stderr = BufWriter::new(io::stderr().lock());
 
     let state = CliState {
-        config: config,
+        config,
         stdout: Box::new(stdout),
         stderr: Box::new(stderr),
     };

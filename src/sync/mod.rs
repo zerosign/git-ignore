@@ -1,4 +1,4 @@
-use std::str::FromStr;
+use std::{path::Path, str::FromStr};
 
 use gix::{ObjectId, Repository, bstr::BStr, traverse::tree::visit::Action};
 use redb::{Database, ReadableDatabase, ReadableTable};
@@ -11,19 +11,19 @@ use crate::{
 };
 
 pub struct TemplateVisitor<'a> {
-    source_name: &'a str,
+    source: &'a str,
     repo: &'a gix::Repository,
     upserts: &'a mut Vec<Changed>,
 }
 
 impl<'a> TemplateVisitor<'a> {
     pub fn new(
-        source_name: &'a str,
+        source: &'a str,
         repo: &'a gix::Repository,
         upserts: &'a mut Vec<Changed>,
     ) -> Self {
         Self {
-            source_name,
+            source,
             repo,
             upserts,
         }
@@ -49,33 +49,27 @@ impl gix::traverse::tree::Visit for TemplateVisitor<'_> {
 
     // 3. For files: filter on the fly!
     fn visit_nontree(&mut self, entry: &gix::objs::tree::EntryRef<'_>) -> Action {
-        if entry.filename.ends_with(b".gitignore") {
-            // "macOS.gitignore" -> "macos" (drops any parent folder)
-            let stem = entry
-                .filename
-                .strip_suffix(b".gitignore")
-                .unwrap_or(entry.filename);
-            let name = String::from_utf8_lossy(stem).to_lowercase();
-            let namespace = TemplateSource::key_of(self.source_name, &name);
+        let Some(namespace) = TemplateSource::key_of_loc(self.source, entry.filename) else {
+            return Action::Continue(false);
+        };
 
-            // Fetch blob and stream directly into `upserts`!
-            if let Ok(blob) = self.repo.find_object(entry.oid).map(|o| o.into_blob()) {
-                let content = String::from_utf8_lossy(&blob.data).to_string();
+        let Ok(blob) = self.repo.find_object(entry.oid).map(gix::Object::into_blob) else {
+            return Action::Continue(false);
+        };
 
-                self.upserts.push(Changed {
-                    namespace,
-                    oid: entry.oid.to_owned(),
-                    content,
-                });
-            }
-        }
+        let content = String::from_utf8_lossy(&blob.data).to_string();
+
+        self.upserts.push(Changed {
+            namespace,
+            oid: entry.oid.to_owned(),
+            content,
+        });
 
         Action::Continue(false)
     }
 }
 
 pub fn ensure_fail(source: &TemplateSource, force: bool) -> Repository {
-    // TODO: this need to be success
     let path = &source.path;
 
     if force && path.exists() {
@@ -85,6 +79,7 @@ pub fn ensure_fail(source: &TemplateSource, force: bool) -> Repository {
     match gix::open(path) {
         Ok(repo) => {
             let packed_lock = path.join("packed-refs.lock");
+
             if packed_lock.exists() {
                 let _ = std::fs::remove_file(packed_lock);
             }
@@ -93,9 +88,17 @@ pub fn ensure_fail(source: &TemplateSource, force: bool) -> Repository {
             let default_branch = repo
                 .head()
                 .ok()
-                .and_then(|h| h.referent_name().map(|r| r.to_string()))
-                .or_else(|| repo.find_reference("refs/heads/main").ok().map(|r| r.name().to_string()))
-                .or_else(|| repo.find_reference("refs/heads/master").ok().map(|r| r.name().to_string()))
+                .and_then(|h| h.referent_name().map(std::string::ToString::to_string))
+                .or_else(|| {
+                    repo.find_reference("refs/heads/main")
+                        .ok()
+                        .map(|r| r.name().to_string())
+                })
+                .or_else(|| {
+                    repo.find_reference("refs/heads/master")
+                        .ok()
+                        .map(|r| r.name().to_string())
+                })
                 .expect("fails to resolve default branch");
 
             let branch = source.branch.as_deref().unwrap_or(&default_branch);
@@ -106,10 +109,7 @@ pub fn ensure_fail(source: &TemplateSource, force: bool) -> Repository {
                 .expect("fails to find remote origin");
 
             let remote = remote
-                .with_refspecs(
-                    [refspec.as_str()],
-                    gix::remote::Direction::Fetch,
-                )
+                .with_refspecs([refspec.as_str()], gix::remote::Direction::Fetch)
                 .expect("fails to set refspecs");
 
             let conn = remote
@@ -156,26 +156,72 @@ pub struct Changed {
     pub content: String,
 }
 
-fn traverse_full(repo: &Repository, oid: ObjectId, source_name: &str, upserts: &mut Vec<Changed>) {
+#[derive(Default)]
+pub struct Changes {
+    pub upserts: Vec<Changed>,
+    pub deletes: Vec<String>,
+}
+
+impl Changes {
+    pub const fn is_empty(&self) -> bool {
+        self.upserts.is_empty() && self.deletes.is_empty()
+    }
+}
+
+fn traverse_full(repo: &Repository, oid: ObjectId, source: &str, changes: &mut Changes) {
     // populate the upserts since we don't have it yet in redb for this specific source
     let head = repo
         .find_object(oid)
         .expect("fails to fetch object head for this tree");
 
     let tree = head.peel_to_tree().expect("fails to fetch the tree");
-    let mut visitor = TemplateVisitor::new(source_name, repo, upserts);
+    let mut visitor = TemplateVisitor::new(source, repo, &mut changes.upserts);
 
     tree.traverse()
         .breadthfirst(&mut visitor)
         .expect("fail to populate upserts");
 }
 
+fn traverse_diff(
+    repo: &Repository,
+    source: &str,
+    old_oid: ObjectId,
+    new_oid: ObjectId,
+    changes: &mut Changes,
+) {
+    let old_tree = repo
+        .find_object(old_oid)
+        .ok()
+        .and_then(|obj| obj.peel_to_tree().ok());
+
+    match old_tree {
+        Some(old_tree) => {
+            let new_tree = repo
+                .find_object(new_oid)
+                .expect("fail to find object_id")
+                .peel_to_tree()
+                .expect("fails to worktree");
+
+            old_tree
+                .changes()
+                .expect("fails to fetch changes")
+                .for_each_to_obtain_tree(&new_tree, |change| {
+                    handle_change(change, source, repo, changes);
+                    Ok::<_, SyncError>(gix::diff::tree::visit::Action::Continue(()))
+                })
+                .expect("fails to populate diff");
+        }
+        None => {
+            traverse_full(repo, new_oid, source, changes);
+        }
+    }
+}
+
 fn handle_change(
     change: gix::object::tree::diff::Change,
     source: &str,
     repo: &Repository,
-    upserts: &mut Vec<Changed>,
-    deletes: &mut Vec<String>,
+    changes: &mut Changes,
 ) {
     use gix::object::tree::diff::Change;
 
@@ -186,46 +232,129 @@ fn handle_change(
         Change::Deletion { location, .. } => (location, None),
     };
 
-    if location.ends_with(b".gitignore") {
-        let filename = location.rsplit(|&b| b == b'/').next().unwrap_or(location);
-        let stem = filename.strip_suffix(b".gitignore").unwrap_or(filename);
-        let name = String::from_utf8_lossy(stem).to_lowercase();
-        let namespace = TemplateSource::key_of(source, &name);
+    let Some(namespace) = TemplateSource::key_of_loc(source, location) else {
+        return;
+    };
 
-        match oid {
-            Some(oid) => {
-                let blob = repo
-                    .find_object(oid)
-                    .expect("fails to fetch object_id")
-                    .into_blob();
+    match oid {
+        Some(oid) => {
+            let blob = repo
+                .find_object(oid)
+                .expect("fails to fetch object_id")
+                .into_blob();
 
-                let content = String::from_utf8_lossy(&blob.data).to_string();
+            let content = String::from_utf8_lossy(&blob.data).to_string();
 
-                upserts.push(Changed {
-                    namespace,
-                    oid,
-                    content,
-                });
-            }
-            _ => {
-                deletes.push(namespace);
-            }
+            changes.upserts.push(Changed {
+                namespace,
+                oid,
+                content,
+            });
+        }
+        _ => {
+            changes.deletes.push(namespace);
         }
     }
+}
+
+fn apply_changes(db: &redb::Database, vkey: &str, new_oid: ObjectId, changes: Changes) {
+    let wtx = db.begin_write().expect("fails to do write tx");
+
+    {
+        // this contains source/template => template content
+        let mut tmpls = wtx
+            .open_table(TEMPLATES_TABLE)
+            .expect("fails to open template table for write");
+
+        // this contains source/template => template object id
+        let mut toids = wtx
+            .open_table(TEMPLATES_OIDS_TABLE)
+            .expect("fails to template oids for write");
+
+        // delete all keys that need to be deleted first
+        for item in changes.deletes {
+            tmpls
+                .remove(item.as_str())
+                .expect("fails to delete tmpl content");
+
+            toids
+                .remove(item.as_str())
+                .expect("fails to delete tmpl oids");
+        }
+
+        // upserts all keys that need to updated
+        for item in changes.upserts {
+            // insert template values first
+            //
+            tmpls
+                .insert(item.namespace.as_str(), item.content.as_str())
+                .expect("fails to insert template content");
+
+            // insert template oids
+            toids
+                .insert(item.namespace.as_str(), item.oid.to_string().as_str())
+                .expect("fails to insert template oids");
+        }
+
+        let mut versions = wtx
+            .open_table(METADATA_TABLE)
+            .expect("fails to open versions table for writes");
+
+        let version = new_oid.to_string();
+
+        versions
+            .insert(vkey, version.as_bytes())
+            .expect("fails to update version of source");
+
+        // TODO: or just drop both tmpls, toids & versions in here hmm
+        // drop(tmpls); 
+        // drop(toids);
+        // drop(versions);
+    }
+
+    wtx.commit().expect("fails to delete");
+}
+
+fn rebuild_cache<P>(db: &redb::Database, path: P) -> Result<(), SyncError>
+where
+    P: AsRef<Path>,
+{
+    let rtx = db.begin_read().expect("fails to read only");
+
+    // this contains source/template => template content
+    let tmpls = rtx
+        .open_table(TEMPLATES_TABLE)
+        .expect("fails to open template table for read");
+
+    let mut names: Vec<String> = tmpls
+        .iter()
+        .expect("fails to scan keys from template table")
+        .flatten()
+        .map(|(k, _)| {
+            let val = k.value();
+            val.split_once('/')
+                .map_or(val, |(_, name)| name)
+                .to_string()
+        })
+        .collect();
+
+    names.sort_unstable();
+    names.dedup();
+
+    // TODO(@zerosign) update the index/cache for this source, we want to use rkyv for this
+    // this will be implemented using ../cache.rs
+    FileCached::save(&path, names).expect("fails to save template names cache");
+
+    Ok(())
 }
 
 // fetch current registered source from the config
 //
 pub fn sync(config: &Config, force: bool) -> Result<(), SyncError> {
-    let db = match Database::open(&config.db_path) {
-        Ok(db) => db,
-        Err(_) => {
-            if let Some(parent) = config.db_path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            Database::create(&config.db_path).expect("fails to open db")
-        }
-    };
+    let db = Database::open(&config.db_path).or_else(|_| {
+        let _ = config.db_path.parent().map(std::fs::create_dir_all);
+        Database::create(&config.db_path)
+    })?;
 
     let mut has_changes = false;
 
@@ -237,14 +366,13 @@ pub fn sync(config: &Config, force: bool) -> Result<(), SyncError> {
             .head()
             .ok()
             .and_then(|head| head.id())
-            .map(|id| id.detach())
+            .map(gix::Id::detach)
             .expect("fails to fetch oid from local repo");
 
         // this is basically contains per source last version
-        let key = source.version_key();
+        let vkey = source.version_key();
 
-        let mut upserts: Vec<Changed> = vec![];
-        let mut deletes: Vec<String> = vec![];
+        let mut changes = Changes::default();
 
         // now let's compare it with TEMPLATES_OIDS_TABLE for each source
         // old_oid <- TEMPLATES_OIDS_TABLE
@@ -254,133 +382,44 @@ pub fn sync(config: &Config, force: bool) -> Result<(), SyncError> {
         {
             // XXX(@zerosign): stupid RAAI tricks for drop ReadTransaction :')
 
-            let rtx = db.begin_read().expect("fails to read only");
+            let old_oid: Option<ObjectId> = (!force)
+                .then(|| {
+                    let rtx = db.begin_read().expect("fails to read only");
 
-            let oids = rtx
-                .open_table(METADATA_TABLE)
-                .expect("fails to open oids tables");
+                    // current version tables (this contains current source version)
+                    let versions = rtx
+                        .open_table(METADATA_TABLE)
+                        .expect("fails to open versions tables");
 
-            let version = (!force)
-                .then(|| oids.get(key.as_str()).expect("fails to fetch value"))
+                    versions.get(vkey.as_str()).ok().flatten().and_then(|v| {
+                        str::from_utf8(v.value())
+                            .ok()
+                            .and_then(|s| ObjectId::from_str(s).ok())
+                    })
+                })
                 .flatten();
 
-            match version {
-                Some(value) => {
-                    let raw = str::from_utf8(value.value())
-                        .expect("fail to fetch data from metadata table");
-
-                    let old_oid = ObjectId::from_str(raw)
-                        .expect("fails to initialize object id from redb Oids tables");
-
-                    if new_oid.eq(&old_oid) {
-                        // the oid are already same then let's do nothing then
-                        // (None, false)
-                        continue;
-                    }
-
-                    // the new oid aren't equal to old oid
-                    // we need to traverse the walktree to update
-                    //
-                    let old_tree = repo
-                        .find_object(old_oid)
-                        .ok()
-                        .and_then(|obj| obj.peel_to_tree().ok());
-
-                    match old_tree {
-                        Some(old_tree) => {
-                            let new_tree = repo
-                                .find_object(new_oid)
-                                .expect("fail to find the object_id")
-                                .peel_to_tree()
-                                .expect("fails to worktree");
-
-                            old_tree
-                                .changes()
-                                .expect("fails to fetch changes")
-                                .for_each_to_obtain_tree(&new_tree, |change| {
-                                    handle_change(
-                                        change,
-                                        &source.name,
-                                        &repo,
-                                        &mut upserts,
-                                        &mut deletes,
-                                    );
-
-                                    Ok::<gix::diff::tree::visit::Action, SyncError>(
-                                        gix::diff::tree::visit::Action::Continue(()),
-                                    )
-                                })
-                                .expect("fails to populate diff");
-                        }
-                        _ => {
-                            // Fallback if old_oid commit is missing from repo: full traversal
-                            traverse_full(&repo, new_oid, &source.name, &mut upserts);
-                        }
-                    }
+            match old_oid {
+                // the oid aren't same
+                Some(old_oid) if old_oid != new_oid => {
+                    traverse_diff(&repo, &source.name, old_oid, new_oid, &mut changes);
                 }
+                // the oid are already same then let's do nothing then
+                Some(_) => continue,
                 _ => {
                     // value is not exists yet in the database
                     // we need to populate and traverse the walktree to update
 
                     // populate the upserts since we don't have it yet in redb for this specific source
-                    traverse_full(&repo, new_oid, &source.name, &mut upserts);
+                    traverse_full(&repo, new_oid, &source.name, &mut changes);
                 }
-            };
+            }
         }
         // We know have every changes that need to be populated in upserts & deletes
 
-        has_changes = has_changes || !deletes.is_empty() || !upserts.is_empty();
+        has_changes = has_changes || !changes.is_empty();
 
-        let wtx = db.begin_write().expect("fails to do write tx");
-
-        {
-            // XXX(@zerosign): another RAAI hack
-
-            let mut tmpls = wtx
-                .open_table(TEMPLATES_TABLE)
-                .expect("fails to open template table for write");
-
-            let mut toids = wtx
-                .open_table(TEMPLATES_OIDS_TABLE)
-                .expect("fails to template oids for write");
-
-            // delete all keys that need to be deleted first
-            for item in deletes {
-                tmpls
-                    .remove(item.as_str())
-                    .expect("fails to delete tmpl content");
-
-                toids
-                    .remove(item.as_str())
-                    .expect("fails to delete tmpl oids");
-            }
-
-            // upserts all keys that need to updated
-            for item in upserts {
-                // insert template values first
-                //
-                tmpls
-                    .insert(item.namespace.as_str(), item.content.as_str())
-                    .expect("fails to insert template content");
-
-                // insert template oids
-                toids
-                    .insert(item.namespace.as_str(), item.oid.to_string().as_str())
-                    .expect("fails to insert template oids");
-            }
-
-            let mut versions = wtx
-                .open_table(METADATA_TABLE)
-                .expect("fails to open versions table for writes");
-
-            let version = new_oid.to_string();
-
-            versions
-                .insert(key.clone().as_str(), version.as_bytes())
-                .expect("fails to update version of source");
-        }
-
-        wtx.commit().expect("fails to delete");
+        apply_changes(&db, &vkey, new_oid, changes);
     }
 
     let reindex = has_changes || !config.cache_path.exists();
@@ -389,30 +428,7 @@ pub fn sync(config: &Config, force: bool) -> Result<(), SyncError> {
         return Ok(());
     }
 
-    let rtx = db.begin_read().expect("fails to read only");
-
-    let tmpls = rtx
-        .open_table(TEMPLATES_TABLE)
-        .expect("fails to open template table for read");
-
-    let mut names: Vec<String> = tmpls
-        .iter()
-        .expect("fails to scan keys from template table")
-        .flatten()
-        .map(|(k, _)| {
-            let val = k.value();
-            val.split_once("/")
-                .map_or(val, |(_, name)| name)
-                .to_string()
-        })
-        .collect();
-
-    names.sort_unstable();
-    names.dedup();
-
-    // TODO(@zerosign) update the index/cache for this source, we want to use rkyv for this
-    // this will be implemented using ../cache.rs
-    FileCached::save(&config.cache_path, names).expect("fails to save template names cache");
+    rebuild_cache(&db, &config.cache_path).expect("fails to rebuild cache");
 
     Ok(())
 }
