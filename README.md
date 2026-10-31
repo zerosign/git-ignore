@@ -44,18 +44,18 @@ I made a few assumptions about what makes a CLI tool fast on Linux, and then I t
 
 ### What I measured (on my machine)
 
-> [!WARNING]
-> This might be a bit outdated :')
+> [!NOTE]
+> Measured using `strace -c` on static `x86_64-unknown-linux-musl` profiling builds tested using the remote origin `default` (`https://github.com/github/gitignore`).
 
-These are the results I got using `strace -c` on my own Linux setup. Your results might be different, but they give a good idea of the footprint:
+These are the results I got using `strace -c` on my own Linux setup with the default remote origin. Your results might be different, but they give a good idea of the footprint:
 
 
 | Task | Command | Syscall Count | Notes |
 | :--- | :--- | :--- | :--- |
-| **Check Version** | `git-ignore -v` | **89** | Mostly just starting the process. |
-| **List Everything** | `git-ignore -l` | **96** | Quick look at the index. |
-| **Get a Template** | `git-ignore Rust` | **111** | Reading directly from memory. |
-| **Update a File** | `git-ignore -p Node` | **121** | Parsing and merging blocks. |
+| **List Everything** | `git-ignore list` | **39** | Ultra-fast zero-copy `rkyv` memory map (down from 96). |
+| **Patch .gitignore** | `git-ignore patch Node` | **173** | Parses and merges managed template blocks. |
+| **System & DB Info** | `git-ignore info` | **304** | Sources, git HEAD, table counts, and SHA256 checks. |
+| **Fresh Upstream Sync** | `git-ignore update -f` | **3,663** | Full git fetch, tree diffing, and paged redb storage. |
 
 
 *NOTE: A simple "Hello World" in some languages can take over 300 syscalls just to say hello!*
@@ -84,10 +84,11 @@ just release-static
 
 ## TODO 
 
-- [ ] use `usage-rs` replacing `argh` so that I don't need to always update `shell completion` manually (urgh).
-- [ ] Replace the FST using simple rkyv artifact instead since we don't really use FST at runtime for search right now, we just use it for storage :')).
-- [ ] Refactor the code a bit, the initial version are not so good but at least it works :')).
-- [ ] Simplify some of the logic :')).
+- [x] Use `usage-rs` replacing `argh` so that I don't need to always update shell completions manually (dynamic generation for Fish, Bash, and Zsh).
+- [x] Replace the FST with a zero-copy `rkyv` artifact (`templates.rkyv`) for sub-2ms template listing without opening the database.
+- [x] Refactor the codebase into modular command handlers (`update`, `list`, `patch`, `info`, `completion`, `compact`).
+- [x] Simplify and streamline error handling into modular domain errors (`StorageError`, `SyncError`, `ConfigError`).
+- [ ] Separate Read and Write flows: use `redb::ReadOnlyDatabase` for read-only commands (`patch`, `info`) while using `redb::Database` for mutating operations (`update`, `compact`) to reduce syscalls (`mmap` allocation & `futex` teardown).
 
 ## License
 MIT - Copyright (c) 2026 zerosign
