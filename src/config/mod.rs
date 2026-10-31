@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 mod error;
 
@@ -35,7 +38,7 @@ impl TemplateSource {
 
         let filename = path.rsplit(|&b| b == b'/').next().unwrap_or(path);
         let stem = filename.strip_suffix(b".gitignore").unwrap_or(filename);
-        
+
         if stem.is_empty() {
             return None;
         }
@@ -55,34 +58,13 @@ pub struct Config {
 }
 
 impl Config {
-    /// Resolves Config from environment variables and system directories.
-    ///
-    /// # Errors
-    /// Returns `ConfigError` if system data directory cannot be resolved or if parsing custom sources fails.
-    pub fn from_env() -> Result<Self, ConfigError> {
-        let data_dir = dirs::data_dir()
-            .ok_or_else(|| ConfigError::Env("Could not resolve data directory".to_string()))?;
+    pub fn parse_ignore_lists<P>(spath: P, raw: &str) -> Vec<(String, TemplateSource)>
+    where
+        P: AsRef<Path>,
+    {
+        let spath = spath.as_ref();
 
-        // data base dir for this app
-        let base_path = data_dir.join("git-ignore");
-
-        // namespaced for sources (contains repository)
-        let source_path = base_path.join("sources");
-
-        let default = (
-            String::from("default"),
-            TemplateSource {
-                name: String::from("default"),
-                url: String::from(DEFAULT_REPO_URL),
-                path: source_path.join("default"),
-                branch: None,
-            },
-        );
-
-        let raw = std::env::var("GIT_IGNORE_SOURCE_LIST").unwrap_or_default();
-
-        let envs = raw
-            .split(',')
+        raw.split(',')
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .filter_map(|part| part.split_once('='))
@@ -91,7 +73,7 @@ impl Config {
                 let url = url.trim();
 
                 if !name.is_empty() && !url.is_empty() {
-                    let path = source_path.join(name);
+                    let path = spath.join(name);
 
                     let (clean_url, branch) = url
                         .split_once('#')
@@ -111,17 +93,38 @@ impl Config {
                     eprintln!("Warning: invalid source format, expected name=url");
                     None
                 }
-            });
+            })
+            .collect()
+    }
+
+    pub fn from_parent_dir<P, I>(parent: P, other: I) -> Result<Self, ConfigError>
+    where
+        P: AsRef<Path>,
+        I: IntoIterator<Item = (String, TemplateSource)>,
+    {
+        // namespaced for sources (contains repository)
+        let parent = PathBuf::from(parent.as_ref());
+        let source_path = parent.join("sources");
+
+        let default = (
+            String::from("default"),
+            TemplateSource {
+                name: String::from("default"),
+                url: String::from(DEFAULT_REPO_URL),
+                path: source_path.join("default"),
+                branch: None,
+            },
+        );
 
         // 3. Chain default and env sources, collect to BTreeMap (for deduplication/sorting), then to Vec
         let sources: Vec<TemplateSource> = std::iter::once(default)
-            .chain(envs)
+            .chain(other)
             .collect::<BTreeMap<String, TemplateSource>>()
             .into_values()
             .collect();
 
-        let db_path = base_path.join("templates.redb");
-        let cache_path = base_path.join("templates.rkyv");
+        let db_path = parent.join("templates.redb");
+        let cache_path = parent.join("templates.rkyv");
 
         Ok(Self {
             sources,
@@ -130,12 +133,30 @@ impl Config {
             project_path: std::env::current_dir()?,
         })
     }
+
+    /// Resolves Config from environment variables and system directories.
+    ///
+    /// # Errors
+    /// Returns `ConfigError` if system data directory cannot be resolved or if parsing custom sources fails.
+    pub fn from_env() -> Result<Self, ConfigError> {
+        let data_dir = dirs::data_dir()
+            .ok_or_else(|| ConfigError::Env("Could not resolve data directory".to_string()))?;
+
+        // data base dir for this app
+        let base_path = data_dir.join("git-ignore");
+        let raw = std::env::var("GIT_IGNORE_SOURCE_LIST").unwrap_or_default();
+
+        let other = Self::parse_ignore_lists(base_path.join("sources"), &raw);
+
+        Self::from_parent_dir(base_path, other)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use rstest::rstest;
+
+    use super::*;
 
     #[test]
     fn test_template_source_version_key() {
@@ -183,5 +204,75 @@ mod tests {
         assert!(!cfg.sources.is_empty());
         assert_eq!(cfg.sources[0].name, "default");
         assert_eq!(cfg.sources[0].url, DEFAULT_REPO_URL);
+    }
+
+    #[rstest]
+    #[case("", 0, None, None, None)]
+    #[case("  , , ", 0, None, None, None)]
+    #[case("invalid", 0, None, None, None)]
+    #[case("=nourl", 0, None, None, None)]
+    #[case("noname=", 0, None, None, None)]
+    #[case(
+        "custom=https://github.com/org/repo",
+        1,
+        Some("custom"),
+        Some("https://github.com/org/repo"),
+        None
+    )]
+    #[case(
+        "  custom = https://github.com/org/repo  ",
+        1,
+        Some("custom"),
+        Some("https://github.com/org/repo"),
+        None
+    )]
+    #[case(
+        "custom=https://github.com/org/repo#main",
+        1,
+        Some("custom"),
+        Some("https://github.com/org/repo"),
+        Some("refs/heads/main")
+    )]
+    #[case(
+        "team=https://git.team/repo#dev, bad, valid=https://valid.org",
+        2,
+        Some("team"),
+        Some("https://git.team/repo"),
+        Some("refs/heads/dev")
+    )]
+    fn test_parse_ignore_lists(
+        #[case] input: &str,
+        #[case] expected_count: usize,
+        #[case] first_name: Option<&str>,
+        #[case] first_url: Option<&str>,
+        #[case] first_branch: Option<&str>,
+    ) {
+        let spath = Path::new("/tmp/sources");
+        let sources = Config::parse_ignore_lists(spath, input);
+
+        assert_eq!(sources.len(), expected_count);
+
+        if let Some(expected_name) = first_name {
+            let (name, source) = &sources[0];
+            assert_eq!(name, expected_name);
+            assert_eq!(source.name, expected_name);
+            assert_eq!(source.url, first_url.unwrap());
+            assert_eq!(source.branch.as_deref(), first_branch);
+            assert_eq!(source.path, spath.join(expected_name));
+        }
+    }
+
+    #[test]
+    fn test_config_from_parent_dir() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let custom = Config::parse_ignore_lists(
+            temp.path().join("sources"),
+            "extra=https://github.com/extra/repo",
+        );
+        let config = Config::from_parent_dir(temp.path(), custom).expect("config");
+
+        assert_eq!(config.db_path, temp.path().join("templates.redb"));
+        assert_eq!(config.cache_path, temp.path().join("templates.rkyv"));
+        assert_eq!(config.sources.len(), 2);
     }
 }
