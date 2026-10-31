@@ -188,6 +188,7 @@ impl TemplateStorage {
         Ok(size)
     }
 
+    #[must_use]
     pub fn last_version_for(&self, vkey: &str) -> Option<String> {
         let rtx = self.db.begin_read().ok()?;
         let versions = self.table_ro(&rtx, VERSIONS_TABLE).ok()?;
