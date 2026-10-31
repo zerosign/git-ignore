@@ -1,17 +1,13 @@
-pub mod cache;
+// pub mod cache;
 pub mod cli;
 pub mod command;
 pub mod config;
 pub mod error;
 pub mod patch;
 pub mod result;
-// pub mod state;
-// pub mod sync;
+pub mod storage;
 
 pub mod sync;
-pub mod tables;
-
-// pub mod visitor;
 
 pub use command::state::CliState;
 pub use config::{Config, TemplateSource};

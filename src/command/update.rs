@@ -1,6 +1,6 @@
 use usage_rs::{Args, RunWith};
 
-use crate::command::state::CliState;
+use crate::{command::state::CliState, storage::TemplateStorage};
 
 #[derive(Args, Debug)]
 pub struct Update {
@@ -21,7 +21,10 @@ impl RunWith<CliState> for Update {
 
         use crate::sync;
 
-        sync::sync(&ctx.config, self.force)?;
+        let storage = TemplateStorage::open(&ctx.config.db_path, &ctx.config.cache_path)
+            .expect("can't open template storage");
+
+        sync::sync(&storage, &ctx.config, self.force)?;
 
         Ok(())
     }

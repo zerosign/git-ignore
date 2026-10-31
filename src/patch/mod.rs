@@ -1,26 +1,3 @@
-//! Intelligent .gitignore patching logic.
-//!
-//! This module implements a "Smart Patch" mechanism that allows `git-ignore` to
-//! manage sections of a `.gitignore` file without interfering with user-defined rules.
-//!
-//! ### The Rationale for Markers
-//!
-//! To provide idempotent and precise updates, the tool must distinguish between:
-//! 1. **Custom Content**: Rules added manually by the user.
-//! 2. **Managed Content**: Templates fetched and maintained by this tool.
-//!
-//! By wrapping managed templates in explicit markers:
-//! ```gitignore
-//! # git-ignore-start: Rust
-//! target/
-//! # git-ignore-end: Rust
-//! ```
-//! The tool achieves:
-//! - **Ownership**: It knows exactly which lines it is responsible for.
-//! - **In-place Updates**: It can replace the content of a specific template without moving it.
-//! - **Idempotency**: Running the same command multiple times results in the same file state.
-//! - **Deduplication**: It prevents the same template from being added multiple times.
-
 use core::fmt;
 use std::collections::HashMap;
 
@@ -36,26 +13,25 @@ pub enum Block {
     Managed { name: String, content: String },
 }
 
-impl Block {
-    fn render(&self) -> Option<String> {
+impl fmt::Display for Block {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Block::Custom(c) => {
-                let trimmed = c.trim_end();
-                (!trimmed.is_empty()).then(|| format!("{trimmed}\n"))
+                let trimmed = c.trim();
+                if !trimmed.is_empty() {
+                    writeln!(f, "{trimmed}")?;
+                }
             }
             Block::Managed { name, content } => {
-                let mut s = format!("{START_MARKER_PREFIX}{name}\n");
+                writeln!(f, "{START_MARKER_PREFIX}{name}")?;
                 let trimmed = content.trim();
                 if !trimmed.is_empty() {
-                    s.push_str(trimmed);
-                    s.push('\n');
+                    writeln!(f, "{trimmed}")?;
                 }
-                s.push_str(END_MARKER_PREFIX);
-                s.push_str(name);
-                s.push('\n');
-                Some(s)
+                writeln!(f, "{END_MARKER_PREFIX}{name}")?;
             }
         }
+        Ok(())
     }
 }
 
@@ -63,12 +39,18 @@ pub struct Blocks(Vec<Block>);
 
 impl fmt::Display for Blocks {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // TODO: do this better in a way I think we can abstract the block then abstract the vec ?
-        for item in self.0.iter().filter_map(Block::render) {
-            writeln!(f, "{item}")?;
-        }
-
-        Ok(())
+        self.0
+            .iter()
+            .filter(|b| match b {
+                Block::Custom(c) => !c.trim().is_empty(),
+                Block::Managed { .. } => true,
+            })
+            .try_fold("", |sep, block| {
+                f.write_str(sep)?;
+                write!(f, "{block}")?;
+                Ok("\n")
+            })
+            .map(|_| ())
     }
 }
 
@@ -91,10 +73,11 @@ impl Patcher {
         while let Some(line) = lines.next() {
             // Check for the new, cleaner marker
             if let Some(name) = line.strip_prefix(START_MARKER_PREFIX) {
-                if !buffer.is_empty() {
-                    blocks.push(Block::Custom(buffer.clone()));
-                    buffer.clear();
+                let trimmed = buffer.trim();
+                if !trimmed.is_empty() {
+                    blocks.push(Block::Custom(trimmed.to_string()));
                 }
+                buffer.clear();
 
                 let name = name.to_string();
                 let end_marker = format!("{END_MARKER_PREFIX}{name}");
@@ -120,8 +103,9 @@ impl Patcher {
             }
         }
 
-        if !buffer.is_empty() {
-            blocks.push(Block::Custom(buffer));
+        let trimmed = buffer.trim();
+        if !trimmed.is_empty() {
+            blocks.push(Block::Custom(trimmed.to_string()));
         }
 
         Self { blocks }
@@ -147,7 +131,7 @@ impl Patcher {
         for block in &mut self.blocks {
             if let Block::Managed { name, content } = block
                 && let Some((original_name, new_content)) = templates.remove(&name.to_lowercase())
-                && !new_content.eq(content)
+                && !new_content.trim().eq(content.trim())
             {
                 // mark that there is an update
                 updated = true;

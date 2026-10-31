@@ -1,70 +1,10 @@
-use std::io::{Write};
+use std::io::Write;
 
-use redb::ReadableTableMetadata;
 use usage_rs::{Args, RunWith};
-
-use crate::{Config, command::state::CliState, error::{InfoError, SyncError}, tables::TEMPLATES_TABLE};
+use crate::{command::state::CliState, storage::TemplateStorage};
 
 #[derive(Args, Debug)]
 pub struct Info;
-
-/// Displays database and system integrity info to the writer.
-///
-/// # Errors
-/// Returns `InfoError` if database querying or writing to the output buffer fails.
-pub fn show_info<D: redb::ReadableDatabase, W: Write>(
-    config: &Config,
-    db: &D,
-    writer: W,
-) -> Result<(), InfoError> {
-    let mut buffered = std::io::BufWriter::new(writer);
-
-    for source in &config.sources {
-        writeln!(buffered, "Source [{}]:", source.name)?;
-        writeln!(buffered, "  URL:  {}", source.url)?;
-        writeln!(buffered, "  Path: {}", source.path.display())?;
-
-        if let Ok(repo) = gix::open(&source.path)
-            && let Ok(head) = repo.head()
-        {
-            writeln!(
-                buffered,
-                "  HEAD: {}",
-                head.id()
-                    .map_or_else(|| "Unknown".to_string(), |id| id.to_string())
-            )?;
-        }
-    }
-
-    writeln!(buffered, "Database Path:\t{}", config.db_path.display())?;
-    writeln!(buffered, "FST Index Path:\t{}", config.fst_path.display())?;
-
-    {
-        let checksum = config.checksum();
-
-        if let Some(hashed) = checksum.0 {
-            writeln!(buffered, "Database Hash:\t{hashed} (SHA256)")?;
-        }
-
-        if let Some(hashed) = checksum.1 {
-            writeln!(buffered, "FST Index Hash:\t{hashed} (SHA256)")?;
-        }
-    }
-
-    let read_txn = db.begin_read()?;
-
-    if let Ok(templates_table) = read_txn.open_table(TEMPLATES_TABLE) {
-        writeln!(
-            buffered,
-            "Template Count:\t{}",
-            templates_table.len().unwrap_or(0)
-        )?;
-    }
-
-    buffered.flush()?;
-
-    Ok(())
-}
 
 impl RunWith<CliState> for Info {
     type Output = crate::result::Result<()>;
@@ -77,11 +17,50 @@ impl RunWith<CliState> for Info {
             let _ = gix::interrupt::init_handler(2, || {});
         }
 
-        let db = redb::Builder::new()
-            .open_read_only(&ctx.config.db_path)
-            .map_err(SyncError::from)?;
+        let mut writer = ctx.stdout;
 
-        show_info(&ctx.config, &db, ctx.stdout)?;
+        let storage = TemplateStorage::open(&ctx.config.db_path, &ctx.config.cache_path)
+            .expect("can't open template storage");
+
+        for source in &ctx.config.sources {
+            writeln!(writer, "Source [{}]:", source.name)?;
+            writeln!(writer, "  URL:  {}", source.url)?;
+            writeln!(writer, "  Path: {}", source.path.display())?;
+
+            if let Ok(repo) = gix::open(&source.path)
+                && let Ok(head) = repo.head()
+            {
+                writeln!(
+                    writer,
+                    "  HEAD: {}",
+                    head.id()
+                        .map_or_else(|| "Unknown".to_string(), |id| id.to_string())
+                )?;
+            }
+        }
+
+        writeln!(writer, "Database Path:\t{}", ctx.config.db_path.display())?;
+        writeln!(writer, "Caches Path:\t{}", ctx.config.cache_path.display())?;
+
+        {
+            let checksum = storage.checksum();
+
+            if let Some(hashed) = checksum.0 {
+                writeln!(writer, "Database Hash:\t{hashed} (SHA256)")?;
+            }
+
+            if let Some(hashed) = checksum.1 {
+                writeln!(writer, "Caches Index Hash:\t{hashed} (SHA256)")?;
+            }
+        }
+
+        writeln!(
+            writer,
+            "Template Count:\t{}",
+            storage.counts().expect("can't fetch counts from tables")
+        )?;
+
+        writer.flush()?;
 
         Ok(())
     }
