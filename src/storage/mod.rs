@@ -239,3 +239,256 @@ impl TemplateStorage {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use gix::ObjectId;
+    use rstest::{fixture, rstest};
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::sync::{Changed, Changes};
+
+    #[fixture]
+    fn storage() -> (TemplateStorage, TempDir) {
+        let temp = tempfile::tempdir().expect("failed to create temp dir");
+        let db_path = temp.path().join("nested/dir/templates.redb");
+        let cache_path = temp.path().join("nested/dir/templates.rkyv");
+        let s = TemplateStorage::open(&db_path, &cache_path).expect("open storage");
+
+        (s, temp)
+    }
+
+    #[rstest]
+    fn test_storage_open_and_lazy_tables(storage: (TemplateStorage, TempDir)) {
+        let (s, temp) = storage;
+
+        // Auto-directory creation check
+        assert!(temp.path().join("nested/dir/templates.redb").exists());
+
+        // Lazy table creation check (TEMPLATES_TABLE created on demand)
+        let count = s.counts().expect("counts on fresh db");
+
+        assert_eq!(count, 0);
+
+        // Lazy table creation check (VERSIONS_TABLE created on demand)
+        let version = s.last_version_for("last_commit_hash:default");
+
+        assert_eq!(version, None);
+    }
+
+    #[rstest]
+    fn test_storage_save_changes_and_retrieval(storage: (TemplateStorage, TempDir)) {
+        let (s, _temp) = storage;
+
+        let source = TemplateSource {
+            name: "default".to_string(),
+            url: "https://github.com/github/gitignore".to_string(),
+            path: PathBuf::from("/tmp/sources/default"),
+            branch: None,
+        };
+
+        let dummy_oid = ObjectId::null(gix::hash::Kind::Sha1);
+
+        let changes = Changes {
+            upserts: vec![
+                Changed {
+                    namespace: "default/rust".to_string(),
+                    oid: dummy_oid,
+                    content: "target/\n**/*.rs.bk\n".to_string(),
+                },
+                Changed {
+                    namespace: "default/python".to_string(),
+                    oid: dummy_oid,
+                    content: "__pycache__/\n*.pyc\n".to_string(),
+                },
+            ],
+            deletes: vec![],
+        };
+
+        // 1. Save changes and version
+        let vkey = source.version_key();
+        s.save_changes(&vkey, "commit_sha_123", changes)
+            .expect("save_changes should succeed");
+
+        // 2. Verify version hash is stored and retrievable
+        assert_eq!(s.last_version_for(&vkey).as_deref(), Some("commit_sha_123"));
+
+        // 3. Verify counts
+        assert_eq!(s.counts().expect("counts"), 2);
+
+        // 4. Verify templates_for with unqualified name ("rust")
+        let queried = s
+            .templates_for(
+                HashSet::from(["rust".to_string()]),
+                std::slice::from_ref(&source),
+            )
+            .expect("templates_for");
+
+        assert_eq!(
+            queried.get("rust").map(String::as_str),
+            Some("target/\n**/*.rs.bk")
+        );
+
+        // 5. Verify templates_for with qualified name ("default/python")
+        let queried = s
+            .templates_for(
+                HashSet::from(["default/python".to_string()]),
+                std::slice::from_ref(&source),
+            )
+            .expect("templates_for");
+
+        assert_eq!(
+            queried.get("default/python").map(String::as_str),
+            Some("__pycache__/\n*.pyc")
+        );
+
+        // 6. Non-existent template should not be returned
+        let queried = s
+            .templates_for(
+                HashSet::from(["nonexistent".to_string()]),
+                std::slice::from_ref(&source),
+            )
+            .expect("templates_for");
+
+        assert!(queried.is_empty());
+    }
+
+    #[rstest]
+    fn test_storage_save_changes_deletes(storage: (TemplateStorage, TempDir)) {
+        let (s, _temp) = storage;
+
+        let source = TemplateSource {
+            name: "default".to_string(),
+            url: "https://github.com/github/gitignore".to_string(),
+            path: PathBuf::from("/tmp/sources/default"),
+            branch: None,
+        };
+
+        let dummy_oid = ObjectId::null(gix::hash::Kind::Sha1);
+        let vkey = source.version_key();
+
+        // 1. Initial insert
+        s.save_changes(
+            &vkey,
+            "v1",
+            Changes {
+                upserts: vec![Changed {
+                    namespace: "default/rust".to_string(),
+                    oid: dummy_oid,
+                    content: "target/\n".to_string(),
+                }],
+                deletes: vec![],
+            },
+        )
+        .expect("insert");
+
+        assert_eq!(s.counts().expect("counts"), 1);
+
+        // 2. Perform delete
+        s.save_changes(
+            &vkey,
+            "v2",
+            Changes {
+                upserts: vec![],
+                deletes: vec!["default/rust".to_string()],
+            },
+        )
+        .expect("delete");
+
+        // 3. Verify counts decreases and retrieval returns empty
+        assert_eq!(s.counts().expect("counts"), 0);
+        
+        let queried = s
+            .templates_for(
+                HashSet::from(["rust".to_string()]),
+                std::slice::from_ref(&source),
+            )
+            .expect("templates_for");
+
+        assert!(queried.is_empty());
+    }
+
+    #[rstest]
+    fn test_storage_build_cache_and_load(storage: (TemplateStorage, TempDir)) {
+        let (s, temp) = storage;
+
+        let dummy_oid = ObjectId::null(gix::hash::Kind::Sha1);
+        let changes = Changes {
+            upserts: vec![
+                Changed {
+                    namespace: "default/rust".to_string(),
+                    oid: dummy_oid,
+                    content: "target/\n".to_string(),
+                },
+                Changed {
+                    namespace: "default/go".to_string(),
+                    oid: dummy_oid,
+                    content: "*.exe\n".to_string(),
+                },
+                Changed {
+                    namespace: "custom/python".to_string(),
+                    oid: dummy_oid,
+                    content: "*.pyc\n".to_string(),
+                },
+            ],
+            deletes: vec![],
+        };
+
+        s.save_changes("last_commit_hash:default", "sha1", changes)
+            .expect("save_changes");
+
+        // 1. Build binary rkyv cache
+        s.build_cache().expect("build_cache");
+
+        let cache_file = temp.path().join("nested/dir/templates.rkyv");
+
+        assert!(cache_file.exists());
+
+        // 2. Load cache with FileCached and inspect names
+        let templates = FileCached::load(&cache_file).expect("FileCached::load");
+        let names: Vec<&str> = (&templates).into_iter().collect();
+
+        // Names should be namespace-stripped, sorted, and deduplicated
+        assert_eq!(names, vec!["go", "python", "rust"]);
+    }
+
+    #[rstest]
+    fn test_storage_compact_and_checksum(mut storage: (TemplateStorage, TempDir)) {
+        let (s, _temp) = &mut storage;
+
+        // 1. Before cache is built, db hash exists, cache hash is None
+        let (db_hash, cache_hash) = s.checksum();
+        assert!(db_hash.is_some());
+
+        let db_hash = db_hash.unwrap();
+
+        assert_eq!(db_hash.len(), 64);
+        assert!(db_hash.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(cache_hash, None);
+
+        // 2. Build cache and verify both hashes exist
+        // Note: list_names inside build_cache initializes TEMPLATES_TABLE on demand via table_ro,
+        // which commits table metadata to redb.
+        s.build_cache().expect("build_cache");
+
+        let (db_hash_after, cache_hash_after) = s.checksum();
+
+        assert!(db_hash_after.is_some());
+        assert!(cache_hash_after.is_some());
+
+        let cache_hash = cache_hash_after.unwrap();
+
+        assert_eq!(cache_hash.len(), 64);
+        assert!(cache_hash.chars().all(|c| c.is_ascii_hexdigit()));
+
+        // 3. Compact should complete successfully and db hash remains valid
+        s.compact().expect("compact should succeed");
+
+        let (db_hash_final, _) = s.checksum();
+
+        assert!(db_hash_final.is_some());
+    }
+}
