@@ -35,6 +35,11 @@ impl TemplateSource {
 
         let filename = path.rsplit(|&b| b == b'/').next().unwrap_or(path);
         let stem = filename.strip_suffix(b".gitignore").unwrap_or(filename);
+        
+        if stem.is_empty() {
+            return None;
+        }
+
         let name = String::from_utf8_lossy(stem).to_lowercase();
 
         Some(TemplateSource::key_of(source, &name))
@@ -130,6 +135,7 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     #[test]
     fn test_template_source_version_key() {
@@ -142,29 +148,29 @@ mod tests {
         assert_eq!(source.version_key(), "last_commit_hash:default");
     }
 
-    #[test]
-    fn test_template_source_key_of() {
-        assert_eq!(TemplateSource::key_of("default", "Rust"), "default/rust");
-        assert_eq!(TemplateSource::key_of("custom", "Python"), "custom/python");
+    #[rstest]
+    #[case("default", "Rust", "default/rust")]
+    #[case("custom", "Python", "custom/python")]
+    #[case("org", "Go-Lang", "org/go-lang")]
+    fn test_template_source_key_of(
+        #[case] source: &str,
+        #[case] name: &str,
+        #[case] expected: &str,
+    ) {
+        assert_eq!(TemplateSource::key_of(source, name), expected);
     }
 
-    #[test]
-    fn test_template_source_key_of_loc() {
+    #[rstest]
+    #[case("Rust.gitignore", Some("default/rust"))]
+    #[case("Global/macOS.gitignore", Some("default/macos"))]
+    #[case("Community/Golang.gitignore", Some("default/golang"))]
+    #[case("src/main.rs", None)]
+    #[case("README.md", None)]
+    #[case(".gitignore", None)]
+    fn test_template_source_key_of_loc(#[case] path: &str, #[case] expected: Option<&str>) {
         assert_eq!(
-            TemplateSource::key_of_loc("default", b"Rust.gitignore"),
-            Some("default/rust".to_string())
-        );
-        assert_eq!(
-            TemplateSource::key_of_loc("default", b"Global/macOS.gitignore"),
-            Some("default/macos".to_string())
-        );
-        assert_eq!(
-            TemplateSource::key_of_loc("default", b"src/main.rs"),
-            None
-        );
-        assert_eq!(
-            TemplateSource::key_of_loc("default", b"README.md"),
-            None
+            TemplateSource::key_of_loc("default", path.as_bytes()),
+            expected.map(String::from)
         );
     }
 
