@@ -39,9 +39,6 @@ I made a few assumptions about what makes a CLI tool fast on Linux, and then I t
 2.  **Static Linking**: I built the tool with `musl` so it's a completely standalone file. It's a bit larger, but it doesn't have to 
     look for libraries on your system when it starts up.
 
-3.  **Memory Mapping**: I relied on the OS to handle the heavy lifting of reading the database file into memory, which seems a 
-    lot more efficient for this kind of work.
-
 ### What I measured (on my machine)
 
 > [!NOTE]
