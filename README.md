@@ -1,7 +1,7 @@
 # git-ignore
 
 This is a personal technical study and a small utility I built to explore what's possible with high performance systems programming in Rust using native ecosystem library in Rust. 
-It specifically looks at how to use [redb](https://github.com/cberner/redb) for storing data and [gix (gitoxide)](https://github.com/Byron/gitoxide) for handlin ag Git repositories 
+It specifically looks at how to use [redb](https://github.com/cberner/redb) for storing data and [gix (gitoxide)](https://github.com/Byron/gitoxide) for handling Git repositories 
 without the usual overhead.
 
 > [!WARNING]
