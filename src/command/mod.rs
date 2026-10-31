@@ -5,4 +5,5 @@ pub mod patch;
 pub mod list;
 pub mod info;
 pub mod compact;
+pub mod completion;
 pub mod version;

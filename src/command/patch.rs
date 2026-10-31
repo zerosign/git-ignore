@@ -2,12 +2,34 @@ use std::{collections::HashSet, fs};
 
 use usage_rs::{Args, RunWith};
 
-use crate::{command::state::CliState, error::CliError, patch::Patcher, storage::TemplateStorage};
+use crate::{
+    command::state::CliState, error::CliError, patch::Patcher, storage::FileCached,
+    storage::TemplateStorage, Config,
+};
+
+fn complete_templates(
+    _partial: &<Patch as usage_rs::argv::spec::CommandArgs>::Partial,
+    _ctx: &usage_rs::complete::CompleteCtx<'_>,
+) -> Vec<usage_rs::complete::Candidate<'static>> {
+    let Ok(config) = Config::from_env() else {
+        return Vec::new();
+    };
+
+    let Ok(templates) = FileCached::load(&config.cache_path) else {
+        return Vec::new();
+    };
+
+    (&templates)
+        .into_iter()
+        .map(usage_rs::complete::Candidate::new)
+        .collect()
+}
 
 #[derive(Args, Debug)]
 pub struct Patch {
     #[usage(short, long)]
     pub(crate) dry_run: bool,
+    #[usage(complete = complete_templates)]
     pub(crate) templates: Vec<String>,
 }
 

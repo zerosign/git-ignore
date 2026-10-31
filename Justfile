@@ -63,16 +63,16 @@ tag version:
     git push origin v{{version}}
     @echo "Tag pushed! GitHub Actions will now build and publish the release."
 
-# Install shell completions (requires sudo for some locations)
-# install-completions:
-#     @echo "Installing completions..."
-#     # Bash
-#     mkdir -p ~/.local/share/bash-completion/completions
-#     cp resources/git-ignore.bash ~/.local/share/bash-completion/completions/git-ignore
-#     # Fish
-#     mkdir -p ~/.config/fish/completions
-#     cp resources/git-ignore.fish ~/.config/fish/completions/git-ignore.fish
-#     # Zsh (local user directory, ensure it's in your fpath)
-#     mkdir -p ~/.zsh/completions
-#     cp resources/_git-ignore ~/.zsh/completions/_git-ignore
-#     @echo "Done. Note: For Zsh, ensure ~/.zsh/completions is in your fpath in .zshrc."
+# Install shell completions for Fish, Bash, and Zsh
+install-completions:
+    @echo "Installing completions..."
+    # Bash
+    mkdir -p ~/.local/share/bash-completion/completions
+    cargo run --quiet -- completion bash > ~/.local/share/bash-completion/completions/git-ignore
+    # Fish
+    mkdir -p ~/.config/fish/completions
+    cargo run --quiet -- completion fish > ~/.config/fish/completions/git-ignore.fish
+    # Zsh (local user directory, ensure it's in your fpath)
+    mkdir -p ~/.zsh/completions
+    cargo run --quiet -- completion zsh > ~/.zsh/completions/_git-ignore
+    @echo "Done! Installed completions for fish, bash, and zsh."

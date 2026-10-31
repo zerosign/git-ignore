@@ -1,7 +1,8 @@
 use usage_rs::{Cli, Subcommands};
 
 use crate::command::{
-    compact::Compact, info::Info, list::List, patch::Patch, update::Update, version::Version,
+    compact::Compact, completion::Completion, info::Info, list::List, patch::Patch, update::Update,
+    version::Version,
 };
 //
 // pub struct CliState {
@@ -11,7 +12,7 @@ use crate::command::{
 // }
 
 #[derive(Cli, Debug)]
-#[usage(bin = "git-ignore")]
+#[usage(bin = "git-ignore", completion)]
 /// Git-ignore CLI
 pub struct GitIgnoreCli {
     #[usage(subcommand)]
@@ -43,4 +44,7 @@ pub enum Command {
 
     /// Show version information
     Version(Version),
+
+    /// Generate shell completion script
+    Completion(Completion),
 }
