@@ -1,3 +1,18 @@
+# Default recipe: quick check
+default: check
+
+# Check host target
+check:
+    cargo check
+
+# Check static musl target with performance feature set
+check-musl:
+    cargo check --target x86_64-unknown-linux-musl --no-default-features --features performance
+
+# Check all targets and test configurations
+check-all: check check-musl
+    cargo check --tests
+
 # Build in debug mode (Fast iteration, avoids aws-lc-rs)
 build:
     cargo build
@@ -7,12 +22,12 @@ run *args:
     cargo run -- {{args}}
 
 # Run tests (Safe for mold linker)
-test:
-    cargo test -- --test-threads=1
+test *args="":
+    cargo test {{args}} -- --test-threads=1
 
 # Run clippy
 lint:
-    cargo clippy -- -D warnings
+    cargo clippy --all-targets -- -D warnings
 
 # Format code
 fmt:
@@ -30,6 +45,10 @@ install-static: release-static
     mkdir -p ~/.cargo/bin
     cp target/x86_64-unknown-linux-musl/release/git-ignore ~/.cargo/bin/git-ignore
     @echo "Static binary installed to: ~/.cargo/bin/git-ignore"
+
+# Profile command syscalls using strace on the static musl release binary
+bench-strace *args="update":
+    strace -c ./target/x86_64-unknown-linux-musl/release/git-ignore {{args}}
 
 # Build a standard optimized binary for a specific target (used by CI for macOS/Windows)
 release-dynamic target:
