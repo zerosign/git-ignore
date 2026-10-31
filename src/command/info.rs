@@ -1,6 +1,7 @@
 use std::io::Write;
 
 use usage_rs::{Args, RunWith};
+
 use crate::{command::state::CliState, storage::TemplateStorage};
 
 #[derive(Args, Debug)]
@@ -19,8 +20,7 @@ impl RunWith<CliState> for Info {
 
         let mut writer = ctx.stdout;
 
-        let storage = TemplateStorage::open(&ctx.config.db_path, &ctx.config.cache_path)
-            .expect("can't open template storage");
+        let storage = TemplateStorage::open(&ctx.config.db_path, &ctx.config.cache_path)?;
 
         for source in &ctx.config.sources {
             writeln!(writer, "Source [{}]:", source.name)?;
@@ -54,11 +54,7 @@ impl RunWith<CliState> for Info {
             }
         }
 
-        writeln!(
-            writer,
-            "Template Count:\t{}",
-            storage.counts().expect("can't fetch counts from tables")
-        )?;
+        writeln!(writer, "Template Count:\t{}", storage.counts()?)?;
 
         writer.flush()?;
 

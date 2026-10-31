@@ -9,10 +9,9 @@ impl RunWith<CliState> for Compact {
     type Output = crate::result::Result<()>;
 
     fn run_with(self, mut ctx: CliState) -> Self::Output {
-        let mut storage = TemplateStorage::open(&ctx.config.db_path, &ctx.config.cache_path)
-            .expect("can't open template storage");
+        let mut storage = TemplateStorage::open(&ctx.config.db_path, &ctx.config.cache_path)?;
 
-        storage.compact().expect("fails to do compactness");
+        storage.compact()?;
 
         writeln!(ctx.stdout.as_mut(), "Database compacted successfully.")?;
 

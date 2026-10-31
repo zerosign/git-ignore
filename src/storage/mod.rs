@@ -5,11 +5,14 @@ use std::{
 };
 
 mod cache;
+mod error;
 mod tables;
 
 pub use cache::{FileCached, Templates};
+pub use error::StorageError;
 use redb::{
-    Database, ReadTransaction, ReadableDatabase, ReadableTable, ReadableTableMetadata, StorageError,
+    Database, ReadOnlyTable, ReadTransaction, ReadableDatabase, ReadableTable,
+    ReadableTableMetadata, TableDefinition,
 };
 use sha2::{Digest, Sha256};
 use tables::{TEMPLATES_OIDS_TABLE, TEMPLATES_TABLE, VERSIONS_TABLE};
@@ -30,12 +33,13 @@ impl TemplateStorage {
         let db_path = PathBuf::from(db_path.as_ref());
         let cache_path = PathBuf::from(cache_path.as_ref());
 
-        let db = Database::open(&db_path)
-            .or_else(|_| {
-                let _ = db_path.parent().map(std::fs::create_dir_all);
-                Database::create(&db_path)
-            })
-            .expect("fails to open template db");
+        let db = Database::open(&db_path).or_else(|_| {
+            if let Some(parent) = db_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+
+            Database::create(&db_path).map_err(StorageError::from)
+        })?;
 
         Ok(Self {
             db,
@@ -43,51 +47,44 @@ impl TemplateStorage {
             cache_path,
         })
     }
-}
 
-impl TemplateStorage {
     pub fn build_cache(&self) -> Result<(), StorageError> {
-        FileCached::save(&self.cache_path, self.list_names())
-            .expect("fails to save template names cache");
-
+        FileCached::save(&self.cache_path, self.list_names()?)?;
         Ok(())
     }
 
     pub fn compact(&mut self) -> Result<(), StorageError> {
-        self.db.compact().expect("error when compacting storage");
+        self.db.compact()?;
         Ok(())
     }
 }
-// 1 read txn
-// - Storage::versions_for => list versions for list of sources
-// - Storage::contents_for => list contents for list of source versions
-//
-// Storage::templates_for => list template contents based on source (based on above helper function with shared read txn)
 
 impl TemplateStorage {
-    fn list_names(&self) -> Vec<String> {
-        let rtx = self.db.begin_read().expect("fails to read only");
+    fn table_ro<K: redb::Key + 'static, V: redb::Value + 'static>(
+        &self,
+        rtx: &ReadTransaction,
+        table: TableDefinition<K, V>,
+    ) -> Result<ReadOnlyTable<K, V>, StorageError> {
+        match rtx.open_table(table) {
+            Ok(table) => Ok(table),
+            Err(redb::TableError::TableDoesNotExist(_)) => {
+                let wtx = self.db.begin_write()?;
+                wtx.open_table(table)?;
+                wtx.commit()?;
 
-        // this contains source/template => template content
-        let tmpls = match rtx.open_table(TEMPLATES_TABLE) {
-            Ok(table) => table,
-            _ => {
-                {
-                    let wtx = self.db.begin_write().expect("can't create write tx");
-
-                    wtx.open_table(TEMPLATES_TABLE).expect("can't create table");
-
-                    wtx.commit().expect("can't commit");
-                }
-
-                rtx.open_table(TEMPLATES_TABLE)
-                    .expect("can't open table still")
+                let new_rtx = self.db.begin_read()?;
+                Ok(new_rtx.open_table(table)?)
             }
-        };
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn list_names(&self) -> Result<Vec<String>, StorageError> {
+        let rtx = self.db.begin_read()?;
+        let tmpls = self.table_ro(&rtx, TEMPLATES_TABLE)?;
 
         let mut names: Vec<String> = tmpls
-            .iter()
-            .expect("fails to scan keys from template table")
+            .iter()?
             .flatten()
             .map(|(k, _)| {
                 let val = k.value();
@@ -100,42 +97,25 @@ impl TemplateStorage {
         names.sort_unstable();
         names.dedup();
 
-        names
+        Ok(names)
     }
 
-    // TODO: this won't do hmm instead we should provide a filter function that do check given
-    // version key I guess
     fn sources_for<'a>(
         &self,
         rtx: &ReadTransaction,
         sources: &'a [TemplateSource],
-    ) -> Vec<&'a TemplateSource> {
-        let versions = match rtx.open_table(VERSIONS_TABLE) {
-            Ok(table) => table,
-            _ => {
-                {
-                    self.db
-                        .begin_write()
-                        .and_then(|wtx| {
-                            wtx.open_table(VERSIONS_TABLE).expect("can't create table");
-                            wtx.commit().expect("can't commit");
-                            Ok(())
-                        })
-                        .expect("can't create table");
-                }
+    ) -> Result<Vec<&'a TemplateSource>, StorageError> {
+        let versions = self.table_ro(rtx, VERSIONS_TABLE)?;
 
-                rtx.open_table(VERSIONS_TABLE)
-                    .expect("can't open table still")
-            }
-        };
-
-        sources
+        let sources = sources
             .iter()
             .filter(|s| {
                 let key = s.version_key();
                 versions.get(key.as_str()).is_ok_and(|v| v.is_some())
             })
-            .collect()
+            .collect();
+
+        Ok(sources)
     }
 
     fn contents_for<S: std::hash::BuildHasher>(
@@ -145,36 +125,17 @@ impl TemplateStorage {
         sources: &[&TemplateSource],
     ) -> Result<HashMap<String, String>, StorageError> {
         let mut contents = HashMap::new();
-
-        // this contains source/template => template content
-        let tmpls = match rtx.open_table(TEMPLATES_TABLE) {
-            Ok(table) => table,
-            _ => {
-                {
-                    self.db
-                        .begin_write()
-                        .and_then(|wtx| {
-                            wtx.open_table(TEMPLATES_TABLE).expect("can't create table");
-                            wtx.commit().expect("can't commit");
-                            Ok(())
-                        })
-                        .expect("can't create table");
-                }
-
-                rtx.open_table(TEMPLATES_TABLE)
-                    .expect("can't open table still")
-            }
-        };
+        let tmpls = self.table_ro(rtx, TEMPLATES_TABLE)?;
 
         for name in names {
             // 1. Map the template to the potential database keys we need to check
             let vkeys = if let Some((source, tname)) = name.split_once('/') {
                 vec![TemplateSource::key_of(source, &tname.to_lowercase())]
             } else {
-                let lower = name.to_lowercase();
                 sources
                     .iter()
-                    .map(|s| TemplateSource::key_of(&s.name, &lower))
+                    // source, name
+                    .map(|s| TemplateSource::key_of(&s.name, &name.to_lowercase()))
                     .collect()
             };
 
@@ -199,7 +160,6 @@ impl TemplateStorage {
 }
 
 fn format_file_hash(path: &Path) -> Option<String> {
-    // TODO
     let bytes = fs::read(path).ok()?;
     let hash = Sha256::digest(&bytes);
     let mut hex = String::with_capacity(64);
@@ -222,59 +182,21 @@ impl TemplateStorage {
     }
 
     pub fn counts(&self) -> Result<usize, StorageError> {
-        let rtx = self.db.begin_read().expect("can't open read tx for db");
-
-        let size = match rtx.open_table(TEMPLATES_TABLE) {
-            Ok(table) => table,
-            _ => {
-                self.db
-                    .begin_write()
-                    .and_then(|wtx| {
-                        wtx.open_table(TEMPLATES_TABLE).expect("can't create table");
-                        wtx.commit().expect("can't commit");
-                        Ok(())
-                    })
-                    .expect("can't create table");
-
-                rtx.open_table(TEMPLATES_TABLE).expect("can't open table")
-            }
-        }
-        .len()
-        .unwrap_or_default() as usize;
-
+        let rtx = self.db.begin_read()?;
+        let tmpls = self.table_ro(&rtx, TEMPLATES_TABLE)?;
+        let size = tmpls.len().unwrap_or_default() as usize;
         Ok(size)
     }
 
-    #[must_use]
     pub fn last_version_for(&self, vkey: &str) -> Option<String> {
-        // old_oid <- Storage::last_version_of(vkey)
-        //
-        let rtx = self.db.begin_read().expect("fails to read only");
-
-        let versions = match rtx.open_table(VERSIONS_TABLE) {
-            Ok(table) => table,
-            _ => {
-                {
-                    self.db
-                        .begin_write()
-                        .and_then(|wtx| {
-                            wtx.open_table(VERSIONS_TABLE).expect("can't create table");
-                            wtx.commit().expect("can't commit");
-                            Ok(())
-                        })
-                        .expect("can't create table");
-                }
-
-                rtx.open_table(VERSIONS_TABLE)
-                    .expect("can't open table still")
-            }
-        };
+        let rtx = self.db.begin_read().ok()?;
+        let versions = self.table_ro(&rtx, VERSIONS_TABLE).ok()?;
 
         versions
             .get(vkey)
             .ok()
             .flatten()
-            .and_then(|v| str::from_utf8(v.value()).ok().map(str::to_string))
+            .and_then(|v| std::str::from_utf8(v.value()).ok().map(str::to_string))
     }
 
     pub fn templates_for<S: std::hash::BuildHasher>(
@@ -282,73 +204,38 @@ impl TemplateStorage {
         names: HashSet<String, S>,
         sources: &[TemplateSource],
     ) -> Result<HashMap<String, String>, StorageError> {
-        let txn = self.db.begin_read().expect("can't create read tx for db");
-
-        // 1 read txn
-        // - Storage::versions_for => list versions for list of sources
-        // - Storage::contents_for => list contents for list of source versions
-        //
-        // Storage::templates_for => list template contents based on source (based on above helper function with shared read txn)
-        //
-        // Filter sources to only include those that have been successfully synced
-        let sources = self.sources_for(&txn, sources);
-
+        let txn = self.db.begin_read()?;
+        let sources = self.sources_for(&txn, sources)?;
         self.contents_for(&txn, names, &sources)
     }
 
-    pub fn save_changes(&self, vkey: &str, version: &str, changes: Changes) {
-        let wtx = self.db.begin_write().expect("fails to do write tx");
+    pub fn save_changes(
+        &self,
+        vkey: &str,
+        version: &str,
+        changes: Changes,
+    ) -> Result<(), StorageError> {
+        let wtx = self.db.begin_write()?;
 
         {
-            // this contains source/template => template content
-            let mut tmpls = wtx
-                .open_table(TEMPLATES_TABLE)
-                .expect("fails to open template table for write");
+            let mut tmpls = wtx.open_table(TEMPLATES_TABLE)?;
+            let mut toids = wtx.open_table(TEMPLATES_OIDS_TABLE)?;
 
-            // this contains source/template => template object id
-            let mut toids = wtx
-                .open_table(TEMPLATES_OIDS_TABLE)
-                .expect("fails to template oids for write");
-
-            // delete all keys that need to be deleted first
             for item in changes.deletes {
-                tmpls
-                    .remove(item.as_str())
-                    .expect("fails to delete tmpl content");
-
-                toids
-                    .remove(item.as_str())
-                    .expect("fails to delete tmpl oids");
+                tmpls.remove(item.as_str())?;
+                toids.remove(item.as_str())?;
             }
 
-            // upserts all keys that need to updated
             for item in changes.upserts {
-                // insert template values first
-                //
-                tmpls
-                    .insert(item.namespace.as_str(), item.content.as_str())
-                    .expect("fails to insert template content");
-
-                // insert template oids
-                toids
-                    .insert(item.namespace.as_str(), item.oid.to_string().as_str())
-                    .expect("fails to insert template oids");
+                tmpls.insert(item.namespace.as_str(), item.content.as_str())?;
+                toids.insert(item.namespace.as_str(), item.oid.to_string().as_str())?;
             }
 
-            let mut versions = wtx
-                .open_table(VERSIONS_TABLE)
-                .expect("fails to open versions table for writes");
-
-            versions
-                .insert(vkey, version.as_bytes())
-                .expect("fails to update version of source");
-
-            // TODO: or just drop both tmpls, toids & versions in here hmm
-            // drop(tmpls);
-            // drop(toids);
-            // drop(versions);
+            let mut versions = wtx.open_table(VERSIONS_TABLE)?;
+            versions.insert(vkey, version.as_bytes())?;
         }
 
-        wtx.commit().expect("fails to delete");
+        wtx.commit()?;
+        Ok(())
     }
 }

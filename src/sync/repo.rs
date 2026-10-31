@@ -4,8 +4,7 @@ use gix::{ObjectId, Repository, bstr::BStr, traverse::tree::visit::Action};
 
 use crate::{
     TemplateSource,
-    error::SyncError,
-    sync::{Changed, Changes},
+    sync::{Changed, Changes, SyncError},
 };
 
 pub(crate) struct TemplateVisitor<'a> {
@@ -63,7 +62,7 @@ impl gix::traverse::tree::Visit for TemplateVisitor<'_> {
     }
 }
 
-pub(crate) fn ensure_fail(source: &TemplateSource, force: bool) -> Repository {
+pub(crate) fn ensure_repo(source: &TemplateSource, force: bool) -> Result<Repository, SyncError> {
     let path = &source.path;
 
     if force && path.exists() {
@@ -92,52 +91,45 @@ pub(crate) fn ensure_fail(source: &TemplateSource, force: bool) -> Repository {
                     .ok()
                     .map(|r| r.name().to_string())
             })
-            .expect("fails to resolve default branch");
+            .ok_or_else(|| SyncError::Op("fails to resolve default branch".into()))?;
 
         let branch = source.branch.as_deref().unwrap_or(&default_branch);
         let refspec = format!("+{branch}:{branch}");
 
         let remote = repo
             .find_remote("origin")
-            .expect("fails to find remote origin");
+            .map_err(|e| SyncError::Op(format!("fails to find remote origin: {e}")))?;
 
         let remote = remote
             .with_refspecs([refspec.as_str()], gix::remote::Direction::Fetch)
-            .expect("fails to set refspecs");
+            .map_err(|e| SyncError::Op(format!("fails to set refspecs: {e}")))?;
 
         let conn = remote
             .connect(gix::remote::Direction::Fetch)
-            .expect("fail to connect to remote");
+            .map_err(|e| SyncError::Fetch(e.to_string()))?;
 
         let prep = conn
             .prepare_fetch(&mut gix::progress::Discard, Default::default())
-            .expect("fails to fetch");
+            .map_err(|e| SyncError::Fetch(e.to_string()))?;
 
         let _ = prep
             .receive(&mut gix::progress::Discard, &gix::interrupt::IS_INTERRUPTED)
-            .expect("fails to receive fetches");
+            .map_err(|e| SyncError::Fetch(e.to_string()))?;
 
-        repo
+        Ok(repo)
     } else {
-        let parent = path.parent().expect("fails to fetch parent dir");
-        std::fs::create_dir_all(parent).expect("fails to create parent dir");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
 
         let mut op = gix::prepare_clone_bare(source.url.as_str(), path)
-            .expect("fails to clone the bare repo");
+            .map_err(|e| SyncError::Clone(e.to_string()))?;
 
-        // https://git-scm.com/book/en/v2/Git-Internals-The-Refspec
-        //
-        // so this means every fetch will update respected local index
-        // this should be safe since we don't do update from local repo
-        //
-        // This simplify a lot of things, so technically after this we can assume
-        // all local oid in the repo that being tracked already on the newest oid.
-        //
         let (repo, _) = op
             .fetch_only(gix::progress::Discard, &gix::interrupt::IS_INTERRUPTED)
-            .expect("fail to fetch the repo");
+            .map_err(|e| SyncError::Fetch(e.to_string()))?;
 
-        repo
+        Ok(repo)
     }
 }
 
@@ -148,7 +140,7 @@ pub struct SourceRepository {
 
 impl SourceRepository {
     pub fn open_or_fetch(source: &TemplateSource, force: bool) -> Result<Self, SyncError> {
-        let repo = ensure_fail(source, force);
+        let repo = ensure_repo(source, force)?;
 
         Ok(Self {
             source: source.name.clone(),
@@ -162,27 +154,24 @@ impl SourceRepository {
             .repo
             .head()?
             .id()
-            .expect("fails to fetch current oid")
+            .ok_or_else(|| SyncError::Op("fails to fetch current oid".into()))?
             .detach()
             .to_string();
 
         Ok(oid)
     }
 
-    fn traverse_full(&self, oid: ObjectId, changes: &mut Changes) {
-        // populate the upserts since we don't have it yet in redb for this specific source
-        let head = self
-            .repo
-            .find_object(oid)
-            .expect("fails to fetch object head for this tree");
-
-        let tree = head.peel_to_tree().expect("fails to fetch the tree");
+    fn traverse_full(&self, oid: ObjectId, changes: &mut Changes) -> Result<(), SyncError> {
+        let head = self.repo.find_object(oid)?;
+        let tree = head.peel_to_tree()?;
         let mut visitor =
             TemplateVisitor::new(self.source.as_str(), &self.repo, &mut changes.upserts);
 
         tree.traverse()
             .breadthfirst(&mut visitor)
-            .expect("fail to populate upserts");
+            .map_err(|e| SyncError::Op(e.to_string()))?;
+
+        Ok(())
     }
 
     fn handle_change(&self, change: gix::object::tree::diff::Change, changes: &mut Changes) {
@@ -201,19 +190,15 @@ impl SourceRepository {
 
         match oid {
             Some(oid) => {
-                let blob = self
-                    .repo
-                    .find_object(oid)
-                    .expect("fails to fetch object_id")
-                    .into_blob();
+                if let Ok(blob) = self.repo.find_object(oid).map(gix::Object::into_blob) {
+                    let content = String::from_utf8_lossy(&blob.data).to_string();
 
-                let content = String::from_utf8_lossy(&blob.data).to_string();
-
-                changes.upserts.push(Changed {
-                    namespace,
-                    oid,
-                    content,
-                });
+                    changes.upserts.push(Changed {
+                        namespace,
+                        oid,
+                        content,
+                    });
+                }
             }
             _ => {
                 changes.deletes.push(namespace);
@@ -228,7 +213,8 @@ impl SourceRepository {
     ) -> Result<Changes, SyncError> {
         let mut changes = Changes::default();
 
-        let new_oid = ObjectId::from_str(&new_oid).expect("fails to convert to objectid");
+        let new_oid = ObjectId::from_str(new_oid)
+            .map_err(|e| SyncError::Op(format!("invalid new oid: {e}")))?;
         let old_oid = old_oid.and_then(|s| ObjectId::from_str(&s).ok());
 
         let old_tree = old_oid
@@ -237,24 +223,17 @@ impl SourceRepository {
 
         match old_tree {
             Some(old_tree) => {
-                let new_tree = self
-                    .repo
-                    .find_object(new_oid)
-                    .expect("fails to find object")
-                    .peel_to_tree()
-                    .expect("fails to pin to a tree");
+                let new_tree = self.repo.find_object(new_oid)?.peel_to_tree()?;
 
                 old_tree
-                    .changes()
-                    .expect("fails to get the changes from old tree")
+                    .changes()?
                     .for_each_to_obtain_tree(&new_tree, |change| {
                         self.handle_change(change, &mut changes);
                         Ok::<_, SyncError>(gix::diff::tree::visit::Action::Continue(()))
-                    })
-                    .expect("fails to traverse");
+                    })?;
             }
             None => {
-                self.traverse_full(new_oid, &mut changes);
+                self.traverse_full(new_oid, &mut changes)?;
             }
         }
 

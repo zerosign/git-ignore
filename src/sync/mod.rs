@@ -1,8 +1,11 @@
 use gix::ObjectId;
 
-use crate::{Config, error::SyncError, storage::TemplateStorage, sync::repo::SourceRepository};
+use crate::{Config, storage::TemplateStorage, sync::repo::SourceRepository};
 
+mod error;
 mod repo;
+
+pub use error::SyncError;
 
 pub struct Changed {
     pub(crate) namespace: String,
@@ -22,14 +25,12 @@ impl Changes {
     }
 }
 
-//
 pub fn sync(storage: &TemplateStorage, config: &Config, force: bool) -> Result<(), SyncError> {
     let mut has_changes = false;
 
     for source in &config.sources {
-        let srepo = SourceRepository::open_or_fetch(source, force).expect("can't fetch repo");
-        let new_oid = srepo.current().expect("can't fetch new oid");
-        // let version = new_oid;
+        let srepo = SourceRepository::open_or_fetch(source, force)?;
+        let new_oid = srepo.current()?;
         let vkey = source.version_key();
 
         let old_oid: Option<String> = (!force).then(|| storage.last_version_for(&vkey)).flatten();
@@ -38,14 +39,11 @@ pub fn sync(storage: &TemplateStorage, config: &Config, force: bool) -> Result<(
             continue;
         }
 
-        let changes = srepo
-            .changes_between(old_oid, &new_oid)
-            .expect("fails to get changes between old and new id");
+        let changes = srepo.changes_between(old_oid, &new_oid)?;
 
-        // We know have every changes that need to be populated in upserts & deletes
         has_changes = has_changes || !changes.is_empty();
 
-        storage.save_changes(&vkey, &new_oid, changes);
+        storage.save_changes(&vkey, &new_oid, changes)?;
     }
 
     let reindex = has_changes || !config.cache_path.exists();
@@ -54,7 +52,7 @@ pub fn sync(storage: &TemplateStorage, config: &Config, force: bool) -> Result<(
         return Ok(());
     }
 
-    storage.build_cache().expect("fails to rebuild cache");
+    storage.build_cache()?;
 
     Ok(())
 }

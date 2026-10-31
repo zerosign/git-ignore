@@ -21,8 +21,7 @@ impl RunWith<CliState> for Update {
 
         use crate::sync;
 
-        let storage = TemplateStorage::open(&ctx.config.db_path, &ctx.config.cache_path)
-            .expect("can't open template storage");
+        let storage = TemplateStorage::open(&ctx.config.db_path, &ctx.config.cache_path)?;
 
         sync::sync(&storage, &ctx.config, self.force)?;
 

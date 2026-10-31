@@ -2,6 +2,8 @@ use std::{fs::File, path::Path};
 
 use memmap2::Mmap;
 
+use super::StorageError;
+
 const MAGIC: &[u8; 9] = b"GITIGNORE";
 const CURRENT_VERSION: u32 = 1;
 
@@ -50,7 +52,7 @@ impl<'a> IntoIterator for &'a Templates {
 }
 
 impl FileCached {
-    pub fn save<P>(path: P, names: Vec<String>) -> Result<(), Box<dyn std::error::Error>>
+    pub fn save<P>(path: P, names: Vec<String>) -> Result<(), StorageError>
     where
         P: AsRef<Path>,
     {
@@ -64,37 +66,39 @@ impl FileCached {
             names,
         };
 
-        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&payload)?;
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&payload)
+            .map_err(|e| StorageError::Cache(e.to_string()))?;
+ 
         std::fs::write(path, bytes)?;
 
         Ok(())
     }
 
-    pub fn load<P>(path: P) -> Result<Templates, Box<dyn std::error::Error>>
+    pub fn load<P>(path: P) -> Result<Templates, StorageError>
     where
         P: AsRef<Path>,
     {
         let file = File::open(path)?;
 
         if file.metadata()?.len() == 0 {
-            return Err("cache file is empty".into());
+            return Err(StorageError::Cache("cache file is empty".into()));
         }
 
         let mmap = unsafe { memmap2::Mmap::map(&file) }?;
 
-        let cache = rkyv::access::<ArchivedFileCached, rkyv::rancor::Error>(&mmap)?;
+        let cache = rkyv::access::<ArchivedFileCached, rkyv::rancor::Error>(&mmap)
+            .map_err(|e| StorageError::Cache(e.to_string()))?;
 
         if !cache.magic.eq(MAGIC) {
-            return Err("cache file has different MAGIC".into());
+            return Err(StorageError::Cache("cache file has different MAGIC".into()));
         }
 
         if cache.version != CURRENT_VERSION {
-            return Err(
-                "cache file is not the same as CURRENT_VERSION, it might incompatible".into(),
-            );
+            return Err(StorageError::Cache(
+                "cache file is not the same as CURRENT_VERSION, it might be incompatible".into(),
+            ));
         }
 
-        // Ok(cache.names)
         Ok(Templates { mmap })
     }
 }

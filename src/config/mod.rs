@@ -6,7 +6,11 @@ use std::{
 
 use sha2::{Digest, Sha256};
 
-use crate::{error::ConfigError, result::Result};
+mod error;
+
+pub use error::ConfigError;
+
+use crate::result::Result;
 
 pub const DEFAULT_REPO_URL: &str = "https://github.com/github/gitignore.git";
 
@@ -47,33 +51,8 @@ impl TemplateSource {
 pub struct Config {
     pub sources: Vec<TemplateSource>,
     pub db_path: PathBuf,
-    pub fst_path: PathBuf,
     pub cache_path: PathBuf,
     pub project_path: PathBuf,
-}
-
-fn format_file_hash(path: &Path) -> Option<String> {
-    // TODO
-    let bytes = fs::read(path).ok()?;
-    let hash = Sha256::digest(&bytes);
-    let mut hex = String::with_capacity(64);
-
-    for b in hash {
-        use std::fmt::Write as _;
-        let _ = write!(hex, "{b:02x}");
-    }
-
-    Some(hex)
-}
-
-impl Config {
-    #[must_use]
-    pub fn checksum(&self) -> (Option<String>, Option<String>) {
-        (
-            format_file_hash(&self.db_path),
-            format_file_hash(&self.fst_path),
-        )
-    }
 }
 
 impl Config {
@@ -143,13 +122,11 @@ impl Config {
             .collect();
 
         let db_path = base_path.join("templates.redb");
-        let fst_path = base_path.join("templates.fst");
         let cache_path = base_path.join("templates.rkyv");
 
         Ok(Self {
             sources,
             db_path,
-            fst_path,
             cache_path,
             project_path: std::env::current_dir()?,
         })
