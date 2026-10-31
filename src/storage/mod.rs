@@ -461,6 +461,7 @@ mod tests {
 
         // 1. Before cache is built, db hash exists, cache hash is None
         let (db_hash, cache_hash) = s.checksum();
+
         assert!(db_hash.is_some());
 
         let db_hash = db_hash.unwrap();

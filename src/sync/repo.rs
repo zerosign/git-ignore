@@ -139,6 +139,14 @@ pub struct SourceRepository {
 }
 
 impl SourceRepository {
+    #[cfg(test)]
+    pub(crate) fn new(source: &str, repo: gix::Repository) -> Self {
+        Self {
+            source: source.to_string(),
+            repo,
+        }
+    }
+
     pub fn open_or_fetch(source: &TemplateSource, force: bool) -> Result<Self, SyncError> {
         let repo = ensure_repo(source, force)?;
 
@@ -238,5 +246,150 @@ impl SourceRepository {
         }
 
         Ok(changes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{path::Path, process::Command};
+
+    use rstest::{fixture, rstest};
+    use tempfile::{TempDir, tempdir};
+
+    use super::*;
+
+    fn run_git(dir: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .expect("failed to execute git command");
+
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    #[fixture]
+    fn git_repo() -> TempDir {
+        let temp = tempdir().expect("tempdir");
+        let path = temp.path();
+
+        run_git(path, &["init"]);
+        run_git(path, &["config", "user.name", "Tester"]);
+        run_git(path, &["config", "user.email", "tester@example.com"]);
+
+        temp
+    }
+
+    #[rstest]
+    fn test_traverse_full_filters_and_parses(git_repo: TempDir) {
+        let repo_path = git_repo.path();
+
+        // 1. Create templates and non-template files
+        std::fs::write(repo_path.join("Rust.gitignore"), "target/\nCargo.lock\n").unwrap();
+
+        std::fs::create_dir_all(repo_path.join("Global")).unwrap();
+        std::fs::write(repo_path.join("Global/macOS.gitignore"), ".DS_Store\n").unwrap();
+
+        std::fs::write(repo_path.join("README.md"), "# Templates\n").unwrap();
+
+        // 2. Commit files
+        run_git(repo_path, &["add", "."]);
+        run_git(repo_path, &["commit", "-m", "Initial commit"]);
+
+        let head_commit = run_git(repo_path, &["rev-parse", "HEAD"]);
+
+        // 3. Open repository and run full traversal
+        let gix_repo = gix::open(repo_path).expect("open repo");
+        let srepo = SourceRepository::new("default", gix_repo);
+
+        let changes = srepo
+            .changes_between(None, &head_commit)
+            .expect("traverse_full should succeed");
+
+        // 4. Verify results
+        assert_eq!(changes.deletes.len(), 0);
+        assert_eq!(changes.upserts.len(), 2);
+
+        let namespaces: Vec<&str> = changes
+            .upserts
+            .iter()
+            .map(|u| u.namespace.as_str())
+            .collect();
+
+        assert!(namespaces.contains(&"default/rust"));
+        assert!(namespaces.contains(&"default/macos"));
+        assert!(!namespaces.contains(&"default/readme"));
+
+        let rust = changes
+            .upserts
+            .iter()
+            .find(|u| u.namespace == "default/rust")
+            .unwrap();
+
+        assert_eq!(rust.content, "target/\nCargo.lock\n");
+    }
+
+    #[rstest]
+    fn test_changes_between_incremental_diff(git_repo: TempDir) {
+        let repo_path = git_repo.path();
+
+        // 1. Initial commit
+        std::fs::write(repo_path.join("Rust.gitignore"), "target/\n").unwrap();
+
+        std::fs::create_dir_all(repo_path.join("Global")).unwrap();
+        std::fs::write(repo_path.join("Global/macOS.gitignore"), ".DS_Store\n").unwrap();
+
+        run_git(repo_path, &["add", "."]);
+        run_git(repo_path, &["commit", "-m", "First commit"]);
+
+        let first_commit = run_git(repo_path, &["rev-parse", "HEAD"]);
+
+        // 2. Second commit: modify Rust, add Python, delete macOS
+        std::fs::write(repo_path.join("Rust.gitignore"), "target/\n*.rs.bk\n").unwrap();
+        std::fs::write(repo_path.join("Python.gitignore"), "*.pyc\n").unwrap();
+        std::fs::remove_file(repo_path.join("Global/macOS.gitignore")).unwrap();
+
+        run_git(repo_path, &["add", "-A"]);
+        run_git(repo_path, &["commit", "-m", "Second commit"]);
+
+        let second_commit = run_git(repo_path, &["rev-parse", "HEAD"]);
+
+        // 3. Diff between the two commits
+        let gix_repo = gix::open(repo_path).expect("open repo");
+        let srepo = SourceRepository::new("default", gix_repo);
+
+        let changes = srepo
+            .changes_between(Some(first_commit), &second_commit)
+            .expect("diff changes");
+
+        // 4. Verify deletions
+        assert_eq!(changes.deletes, vec!["default/macos".to_string()]);
+
+        // 5. Verify upserts
+        assert_eq!(changes.upserts.len(), 2);
+
+        let namespaces: Vec<&str> = changes
+            .upserts
+            .iter()
+            .map(|u| u.namespace.as_str())
+            .collect();
+
+        assert!(namespaces.contains(&"default/rust"));
+        assert!(namespaces.contains(&"default/python"));
+
+        let rust = changes
+            .upserts
+            .iter()
+            .find(|u| u.namespace == "default/rust")
+            .unwrap();
+
+        assert_eq!(rust.content, "target/\n*.rs.bk\n");
     }
 }
