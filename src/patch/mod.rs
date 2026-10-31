@@ -167,59 +167,103 @@ impl Patcher {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_parse_and_serialize_custom() {
-        let content = "node_modules/\n.env\n";
-        let patcher = Patcher::parse(content);
-
-        let patched = patcher.patch(HashMap::new());
-
-        assert!(patched.is_none());
-
-        let patched = patched.unwrap();
-        let result = format!("{}", patched);
-
-        assert_eq!(result, content);
+    fn tmpl(name: &str, content: &str) -> HashMap<String, String> {
+        HashMap::from([(name.to_string(), content.to_string())])
     }
 
     #[test]
-    fn test_patch_new_template() {
-        let content = "custom_entry\n";
+    fn test_parse_plain_blocks() {
+        let content = "node_modules/\n.env\n*.log\n";
         let patcher = Patcher::parse(content);
 
-        let mut templates = HashMap::new();
+        assert_eq!(patcher.blocks.len(), 1);
+        match &patcher.blocks[0] {
+            Block::Custom(c) => assert_eq!(c, "node_modules/\n.env\n*.log"),
+            Block::Managed { .. } => panic!("Expected custom block"),
+        }
 
-        templates.insert("Rust".to_string(), "target/\n".to_string());
-        let patched = patcher.patch(templates);
+        let blocks = Blocks(patcher.blocks);
+        let result = format!("{blocks}");
+        assert_eq!(result, "node_modules/\n.env\n*.log\n");
+    }
+
+    #[test]
+    fn test_patch_new_managed_block() {
+        let content = "custom_entry\n";
+        let patched = Patcher::parse(content).patch(tmpl("Rust", "target/\n"));
 
         assert!(patched.is_some());
+        let result = format!("{}", patched.unwrap());
 
-        let patched = patched.unwrap();
-        let result = format!("{}", patched);
+        assert!(result.contains("custom_entry\n\n# git-ignore-start: Rust\ntarget/\n# git-ignore-end: Rust\n"));
+    }
 
-        assert!(result.contains("custom_entry"));
+    #[test]
+    fn test_patch_idempotency() {
+        let content = "custom_entry\n\n# git-ignore-start: Rust\ntarget/\n# git-ignore-end: Rust\n";
+
+        // Applying identical content must return None (indicating up to date, zero writes)
+        let patched = Patcher::parse(content).patch(tmpl("Rust", "target/\n"));
+        assert!(patched.is_none());
+    }
+
+    #[test]
+    fn test_no_newline_creep() {
+        let initial = "first_rule\n\n# git-ignore-start: Rust\ntarget/\n# git-ignore-end: Rust\n\nsecond_rule\n";
+
+        let pass1 = format!(
+            "{}",
+            Patcher::parse(initial)
+                .patch(tmpl("Rust", "target/\nCargo.lock\n"))
+                .expect("should update")
+        );
+
+        // Second pass with the identical content must be idempotent
+        assert!(
+            Patcher::parse(&pass1)
+                .patch(tmpl("Rust", "target/\nCargo.lock\n"))
+                .is_none()
+        );
+
+        // Third pass updating content again
+        let pass3 = format!(
+            "{}",
+            Patcher::parse(&pass1)
+                .patch(tmpl("Rust", "target/\nCargo.lock\n*.bk\n"))
+                .expect("should update")
+        );
+
+        // Count empty lines to ensure spacer lines do not multiply
+        let empty_lines_pass1 = pass1.lines().filter(|l| l.trim().is_empty()).count();
+        let empty_lines_pass3 = pass3.lines().filter(|l| l.trim().is_empty()).count();
+        assert_eq!(empty_lines_pass1, empty_lines_pass3);
+    }
+
+    #[test]
+    fn test_update_existing_block() {
+        let content = format!("{START_MARKER_PREFIX}Rust\nold_content\n{END_MARKER_PREFIX}Rust\n");
+        let patched = Patcher::parse(&content).patch(tmpl("Rust", "new_content\n"));
+
+        assert!(patched.is_some());
+        let result = format!("{}", patched.unwrap());
+
+        assert!(!result.contains("old_content"));
+        assert!(result.contains("new_content"));
         assert!(result.contains(START_MARKER_PREFIX));
-        assert!(result.contains("Rust"));
-        assert!(result.contains("target/"));
         assert!(result.contains(END_MARKER_PREFIX));
     }
 
     #[test]
-    fn test_patch_existing_template() {
-        let content = format!("{START_MARKER_PREFIX}Rust\nold_content\n{END_MARKER_PREFIX}Rust\n");
-
-        let patcher = Patcher::parse(&content);
-        let mut templates = HashMap::new();
-
-        templates.insert("Rust".to_string(), "new_content\n".to_string());
-        let patched = patcher.patch(templates);
+    fn test_case_insensitive_matching() {
+        let content = format!("{START_MARKER_PREFIX}rust\ntarget/\n{END_MARKER_PREFIX}rust\n");
+        // Request with "Rust" casing while existing is "rust"
+        let patched = Patcher::parse(&content).patch(tmpl("Rust", "target/\nnew_entry\n"));
 
         assert!(patched.is_some());
+        let result = format!("{}", patched.unwrap());
 
-        let patched = patched.unwrap();
-        let result = format!("{}", patched);
-
-        assert!(!result.contains("old_content"));
-        assert!(result.contains("new_content"));
+        // Should update in place, syncing casing to "Rust" without duplicating the block
+        assert_eq!(result.matches(START_MARKER_PREFIX).count(), 1);
+        assert!(result.contains("# git-ignore-start: Rust"));
     }
 }

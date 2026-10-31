@@ -1,10 +1,4 @@
-use std::{
-    collections::BTreeMap,
-    fs,
-    path::{Path, PathBuf},
-};
-
-use sha2::{Digest, Sha256};
+use std::{collections::BTreeMap, path::PathBuf};
 
 mod error;
 
@@ -130,5 +124,58 @@ impl Config {
             cache_path,
             project_path: std::env::current_dir()?,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_template_source_version_key() {
+        let source = TemplateSource {
+            name: "default".to_string(),
+            url: DEFAULT_REPO_URL.to_string(),
+            path: PathBuf::from("/tmp"),
+            branch: None,
+        };
+        assert_eq!(source.version_key(), "last_commit_hash:default");
+    }
+
+    #[test]
+    fn test_template_source_key_of() {
+        assert_eq!(TemplateSource::key_of("default", "Rust"), "default/rust");
+        assert_eq!(TemplateSource::key_of("custom", "Python"), "custom/python");
+    }
+
+    #[test]
+    fn test_template_source_key_of_loc() {
+        assert_eq!(
+            TemplateSource::key_of_loc("default", b"Rust.gitignore"),
+            Some("default/rust".to_string())
+        );
+        assert_eq!(
+            TemplateSource::key_of_loc("default", b"Global/macOS.gitignore"),
+            Some("default/macos".to_string())
+        );
+        assert_eq!(
+            TemplateSource::key_of_loc("default", b"src/main.rs"),
+            None
+        );
+        assert_eq!(
+            TemplateSource::key_of_loc("default", b"README.md"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_config_from_env_default() {
+        let config = Config::from_env();
+        assert!(config.is_ok());
+
+        let cfg = config.unwrap();
+        assert!(!cfg.sources.is_empty());
+        assert_eq!(cfg.sources[0].name, "default");
+        assert_eq!(cfg.sources[0].url, DEFAULT_REPO_URL);
     }
 }
